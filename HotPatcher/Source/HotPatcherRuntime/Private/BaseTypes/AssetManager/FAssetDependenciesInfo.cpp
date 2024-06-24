@@ -1,5 +1,7 @@
 #include "AssetManager/FAssetDependenciesInfo.h"
 #include "FlibAssetManageHelper.h"
+#include "HotPatcherRuntime.h"
+#include "Async/ParallelFor.h"
 
 
 void FAssetDependenciesInfo::AddAssetsDetail(const FAssetDetail& AssetDetail)
@@ -39,25 +41,28 @@ bool FAssetDependenciesInfo::HasAsset(const FString& InAssetPackageName)const
 
 TArray<FAssetDetail> FAssetDependenciesInfo::GetAssetDetails()const
 {
-	TArray<FAssetDetail> OutAssetDetails;
 	SCOPED_NAMED_EVENT_TEXT("FAssetDependenciesInfo::GetAssetDetails",FColor::Red);
-	OutAssetDetails.Empty();
+	
+	TArray<FAssetDetail> AssetDetails;
 	TArray<FString> Keys;
 	AssetsDependenciesMap.GetKeys(Keys);
 
-	for (const auto& Key : Keys)
+	FCriticalSection	SynchronizationObject;
+	ParallelFor(Keys.Num(),[&](int32 index)
 	{
-		TMap<FString, FAssetDetail> ModuleAssetDetails = AssetsDependenciesMap.Find(Key)->AssetDependencyDetails;
+		const TMap<FString, FAssetDetail>& ModuleAssetDetails = AssetsDependenciesMap.Find(Keys[index])->AssetDependencyDetails;
 
 		TArray<FString> ModuleAssetKeys;
 		ModuleAssetDetails.GetKeys(ModuleAssetKeys);
 
 		for (const auto& ModuleAssetKey : ModuleAssetKeys)
 		{
-			OutAssetDetails.Add(*ModuleAssetDetails.Find(ModuleAssetKey));
+			FScopeLock Lock(&SynchronizationObject);
+			AssetDetails.Add(*ModuleAssetDetails.Find(ModuleAssetKey));
 		}
-	}
-	return OutAssetDetails;
+	},GForceSingleThread);
+	
+	return AssetDetails;
 }
 
 bool FAssetDependenciesInfo::GetAssetDetailByPackageName(const FString& InAssetPackageName,FAssetDetail& OutDetail) const
@@ -85,4 +90,29 @@ TArray<FString> FAssetDependenciesInfo::GetAssetLongPackageNames()const
 		}
 	}
 	return OutAssetLongPackageName;
+}
+
+void FAssetDependenciesInfo::RemoveAssetDetail(const FAssetDetail& AssetDetail)
+{
+	SCOPED_NAMED_EVENT_TEXT("FAssetDependenciesInfo::RemoveAssetDetail",FColor::Red);
+	FString LongPackageName = UFlibAssetManageHelper::PackagePathToLongPackageName(AssetDetail.PackagePath.ToString());
+	RemoveAssetDetail(LongPackageName);
+}
+
+void FAssetDependenciesInfo::RemoveAssetDetail(const FString& LongPackageName)
+{
+	FString BelongModuleName = UFlibAssetManageHelper::GetAssetBelongModuleName(LongPackageName);
+	if (AssetsDependenciesMap.Contains(BelongModuleName))
+	{
+		TMap<FString,FAssetDetail>& AssetDependencyDetails = AssetsDependenciesMap.Find(BelongModuleName)->AssetDependencyDetails;
+		bool bHas = AssetDependencyDetails.Contains(LongPackageName);
+		if(bHas)
+		{
+			AssetDependencyDetails.Remove(LongPackageName);
+			if(!AssetDependencyDetails.Num())
+			{
+				AssetsDependenciesMap.Remove(BelongModuleName);
+			}
+		}
+	}
 }

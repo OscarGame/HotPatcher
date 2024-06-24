@@ -74,6 +74,8 @@ struct HOTPATCHERRUNTIME_API FHotPatcherPatchContext:public FHotPatcherContext
 {
     GENERATED_USTRUCT_BODY()
     FHotPatcherPatchContext()=default;
+
+    virtual void Init() override;
     virtual FExportPatchSettings* GetSettingObject(){ return (FExportPatchSettings*)ContextSetting; }
     virtual FString GetTotalTimeRecorderName()const{return TEXT("Generate the patch total time");}
 
@@ -118,14 +120,17 @@ struct HOTPATCHERRUNTIME_API FHotPatcherPatchContext:public FHotPatcherContext
         return Keys.Num();
     }
     FPakFilesMap PakFilesInfoMap;
-
-    void AddExternalFile(const FString& PlatformName,const FString& ChunkName,const FExternFileInfo& AddShaderLib)
-    {
-        GetPatcherDiffInfoByName(PlatformName)->AddExternalFiles.Add(AddShaderLib);
-        GetPatcherChunkInfoByName(PlatformName,ChunkName)->AddExternFileToPak.Add(AddShaderLib);
-    }
-
     bool AddAsset(const FString ChunkName, const FAssetDetail& AssetDetail);
+    
+    void AddExternalFile(const FString& PlatformName,const FString& ChunkName,const FExternFileInfo& AddFile)
+    {
+        if(!IsContainInBase(PlatformName,AddFile))
+        {
+            GetPatcherDiffInfoByName(PlatformName)->AddExternalFiles.Add(AddFile);
+            GetPatcherChunkInfoByName(PlatformName,ChunkName)->AddExternFileToPak.Add(AddFile); 
+        }
+    }
+    bool IsContainInBase(const FString& PlatformName,const FExternFileInfo& AddFile);
 };
 
 USTRUCT(BlueprintType)

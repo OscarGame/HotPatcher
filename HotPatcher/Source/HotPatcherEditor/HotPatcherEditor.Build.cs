@@ -12,11 +12,7 @@ public class HotPatcherEditor : ModuleRules
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
 		bLegacyPublicIncludePaths = false;
 		OptimizeCode = CodeOptimization.InShippingBuildsOnly;
-		if (Target.Version.MajorVersion < 5 && Target.Version.MinorVersion <= 21)
-		{
-			bUseRTTI = true;
-		}
-		
+
 		PublicIncludePaths.AddRange(new string[] { });
 		PrivateIncludePaths.AddRange(new string[] {});
 		
@@ -35,6 +31,7 @@ public class HotPatcherEditor : ModuleRules
 				"DesktopPlatform",
 				"Projects",
 				"Settings",
+				"EditorStyle",
 				"HTTP",
 				"RHI",
 				"EngineSettings",
@@ -55,7 +52,6 @@ public class HotPatcherEditor : ModuleRules
 				"Projects",
 				"DesktopPlatform",
 				"InputCore",
-				"EditorStyle",
 				"LevelEditor",
 				"CoreUObject",
 				"Engine",
@@ -85,24 +81,22 @@ public class HotPatcherEditor : ModuleRules
 		BuildVersion Version;
 		BuildVersion.TryRead(BuildVersion.GetDefaultFileName(), out Version);
 		AddPublicDefinitions("WITH_EDITOR_SECTION", Version.MajorVersion > 4 || Version.MinorVersion > 24);
-		// Game feature
-		bool bEnableGameFeature = false;
-		AddPublicDefinitions("ENGINE_GAME_FEATURE", bEnableGameFeature || (Target.Version.MajorVersion > 4 || Target.Version.MinorVersion > 26));
-		
+
 		System.Console.WriteLine("MajorVersion {0} MinorVersion: {1} PatchVersion {2}",Target.Version.MajorVersion,Target.Version.MinorVersion,Target.Version.PatchVersion);
 
 		PublicDefinitions.AddRange(new string[]
 		{
-			"ENABLE_UPDATER_CHECK=1",
-			"TOOL_NAME=\"HotPatcher\"",
-			"CURRENT_VERSION_ID=76",
-			"CURRENT_PATCH_ID=0",
-			"REMOTE_VERSION_FILE=\"https://imzlp.com/opensource/version.json\""
+			"ENABLE_ORIGINAL_COOKER=0"
+		});
+		
+		PublicDefinitions.AddRange(new string[]
+		{
+			"ENABLE_UPDATER_CHECK=1"
 		});
 
 		bool bEnablePackageContext = true;
 		AddPublicDefinitions("WITH_PACKAGE_CONTEXT", (Version.MajorVersion > 4 || Version.MinorVersion > 23) && bEnablePackageContext);
-		if (Version.MajorVersion > 4 || Version.MajorVersion > 26)
+		if (Version.MajorVersion > 4 || Version.MinorVersion > 26)
 		{
 			PublicDependencyModuleNames.AddRange(new string[]
 			{

@@ -4,16 +4,32 @@
 #include "JsonObjectConverter.h"
 #include "HAL/PlatformMisc.h"
 #include "Misc/EnumRange.h"
+#include "Resources/Version.h"
+#include "Misc/CommandLine.h"
+
 // cpp standard
 #include <typeinfo>
 #include <cctype>
 #include <algorithm>
 #include <string>
 #include <vector>
+#include "Resources/Version.h"
 
 #if  ENGINE_MAJOR_VERSION <=4 && ENGINE_MINOR_VERSION < 25
 #define FProperty UProperty
 #endif
+
+
+#define DECAL_GETCPPTYPENAME_SPECIAL(TypeName) \
+namespace THotPatcherTemplateHelper \
+{\
+	template<>\
+	std::string GetCPPTypeName<TypeName>()\
+	{\
+	return std::string(#TypeName);\
+	};\
+};
+
 
 namespace THotPatcherTemplateHelper
 {
@@ -30,18 +46,17 @@ namespace THotPatcherTemplateHelper
 		output.push_back(s.substr(prev_pos, pos-prev_pos)); // Last word
 		return output;
 	}
-	
-#if ENGINE_MAJOR_VERSION <= 4 && ENGINE_MINOR_VERSION <= 21
+
 	template<typename T>
 	static std::string GetCPPTypeName()
 	{
-		std::string type_name = typeid(T).name();
-		std::vector<std::string> split_results = THotPatcherTemplateHelper::split(type_name,' ');
-		std::string result = split_results.at(split_results.size()-1);
+		// std::string type_name = typeid(T).name();
+		// std::vector<std::string> split_results = THotPatcherTemplateHelper::split(type_name,' ');
+		// std::string result = split_results.at(split_results.size()-1);
+		std::string result;
 		// std::for_each(type_name.begin(),type_name.end(),[&result](const char& character){if(!std::isdigit(character)) result.push_back(character);});
 		return result;
 	}
-#endif
 	
 	template<typename ENUM_TYPE>
 	static UEnum* GetUEnum()
@@ -57,19 +72,20 @@ namespace THotPatcherTemplateHelper
 	}
 	
 	template<typename ENUM_TYPE>
-	static FString GetEnumNameByValue(ENUM_TYPE InEnumValue, bool bFullName = false)
+	FString GetEnumNameByValue(ENUM_TYPE InEnumValue, bool bFullName = false)
 	{
 		SCOPED_NAMED_EVENT_TEXT("GetEnumNameByValue",FColor::Red);
 		FString result;
 		{
 			FString TypeName;
 			FString ValueName;
+			UEnum* FoundEnum = nullptr;
 
 #if ENGINE_MAJOR_VERSION > 4 || ENGINE_MINOR_VERSION > 21
-			UEnum* FoundEnum = StaticEnum<ENUM_TYPE>();
+			FoundEnum = StaticEnum<ENUM_TYPE>();
 #else
 			FString EnumTypeName = ANSI_TO_TCHAR(THotPatcherTemplateHelper::GetCPPTypeName<ENUM_TYPE>().c_str());
-			UEnum* FoundEnum = FindObject<UEnum>(ANY_PACKAGE, *EnumTypeName, true); 
+			FoundEnum = FindObject<UEnum>(ANY_PACKAGE, *EnumTypeName, true); 
 #endif
 			if (FoundEnum)
 			{
@@ -83,20 +99,24 @@ namespace THotPatcherTemplateHelper
 		}
 		return result;
 	}
+	
 
 	template<typename ENUM_TYPE>
-	static bool GetEnumValueByName(const FString& InEnumValueName, ENUM_TYPE& OutEnumValue)
+	bool GetEnumValueByName(const FString& InEnumValueName, ENUM_TYPE& OutEnumValue)
 	{
 		SCOPED_NAMED_EVENT_TEXT("GetEnumValueByName",FColor::Red);
 		bool bStatus = false;
+		UEnum* FoundEnum = nullptr;
+		FString EnumTypeName;
 
 #if ENGINE_MAJOR_VERSION > 4 || ENGINE_MINOR_VERSION > 21
-		UEnum* FoundEnum = StaticEnum<ENUM_TYPE>();
-		FString EnumTypeName = FoundEnum->CppType;
+		FoundEnum = StaticEnum<ENUM_TYPE>();
+		EnumTypeName = FoundEnum->CppType;
 #else
-		FString EnumTypeName = ANSI_TO_TCHAR(THotPatcherTemplateHelper::GetCPPTypeName<ENUM_TYPE>().c_str());
-		UEnum* FoundEnum = FindObject<UEnum>(ANY_PACKAGE, *EnumTypeName, true); 
+		EnumTypeName = ANSI_TO_TCHAR(THotPatcherTemplateHelper::GetCPPTypeName<ENUM_TYPE>().c_str());
+		FoundEnum = FindObject<UEnum>(ANY_PACKAGE, *EnumTypeName, true); 
 #endif
+		
 		if (FoundEnum)
 		{
 			FString EnumValueFullName = EnumTypeName + TEXT("::") + InEnumValueName;
@@ -112,7 +132,6 @@ namespace THotPatcherTemplateHelper
 		return bStatus;
 	}
 
-	
 	template<typename TStructType>
 	static bool TSerializeStructAsJsonObject(const TStructType& InStruct,TSharedPtr<FJsonObject>& OutJsonObject)
 	{
@@ -136,7 +155,20 @@ namespace THotPatcherTemplateHelper
 		}
 		return bStatus;
 	}
-
+	
+	static bool SerializeJsonObjAsJsonString(TSharedPtr<FJsonObject> JsonObject,FString& OutJsonString)
+	{
+		SCOPED_NAMED_EVENT_TEXT("SerializeJsonObjAsJsonString",FColor::Red);
+		bool bRunStatus = false;
+		if(JsonObject.IsValid())
+		{
+			auto JsonWriter = TJsonWriterFactory<>::Create(&OutJsonString);
+			FJsonSerializer::Serialize(JsonObject.ToSharedRef(), JsonWriter);
+			bRunStatus = true;
+		}
+		return bRunStatus;
+	}
+	
 	template<typename TStructType>
     static bool TSerializeStructAsJsonString(const TStructType& InStruct,FString& OutJsonString)
 	{
@@ -204,6 +236,14 @@ namespace THotPatcherTemplateHelper
 		return false;
 	}
 
+	static bool ConvStr2Bool(const FString& Str,bool& bOut)
+	{
+		bool bIsTrue = Str.Equals(TEXT("true"),ESearchCase::IgnoreCase);
+		bool bIsFlase = Str.Equals(TEXT("false"),ESearchCase::IgnoreCase);
+		if(bIsTrue) {	bOut = true;	}
+		if(bIsFlase){	bOut = false;	}
+		return bIsTrue || bIsFlase;
+	}
 	
 	template<typename T>
     static void ReplaceProperty(T& Struct, const TMap<FString, FString>& ParamsMap)
@@ -225,19 +265,25 @@ namespace THotPatcherTemplateHelper
 					TSharedPtr<FJsonObject> JsonObject = DeserializeJsonObject;
 					if(HasPrroperty(T::StaticStruct(),BreakedDot[0]))
 					{
-						for(int32 index=0;index<BreakedDot.Num()-1;++index)
+						int32 lastIndex = BreakedDot.Num()-1;
+						for(int32 index=0;index<lastIndex;++index)
 						{
 							JsonObject = JsonObject->GetObjectField(BreakedDot[index]);
 						}
 
 						if(JsonObject)
 						{
-							JsonObject->SetStringField(BreakedDot[BreakedDot.Num()-1],*ParamsMap.Find(key));
+							FString Value = *ParamsMap.Find(key);
+							FString From = JsonObject->GetStringField(BreakedDot[lastIndex]);
+							JsonObject->SetStringField(BreakedDot[lastIndex],Value);
+							UE_LOG(LogTemp,Display,TEXT("ReplaceProperty %s from %s to %s."),*BreakedDot[0],*From,*Value);
 						}
 					}
 				}
 			}
-			THotPatcherTemplateHelper::TDeserializeJsonObjectAsStruct<T>(DeserializeJsonObject,Struct);
+			FString JsonStr;
+			THotPatcherTemplateHelper::SerializeJsonObjAsJsonString(DeserializeJsonObject,JsonStr);
+			THotPatcherTemplateHelper::TDeserializeJsonObjectAsStruct(DeserializeJsonObject,Struct);
 		}
 	}
 	
@@ -266,6 +312,7 @@ namespace THotPatcherTemplateHelper
 	template <typename T>
 	TArray<T> GetArrayBySrcWithCondition(TArray<T>& SrcArray, TFunction<bool(T)> Matcher, bool RemoveFromSrc)
 	{
+		SCOPED_NAMED_EVENT_TEXT("GetArrayBySrcWithCondition",FColor::Red);
 		TArray<T> result;
 		for(int32 Index = SrcArray.Num() - 1 ;Index >= 0;--Index)
 		{

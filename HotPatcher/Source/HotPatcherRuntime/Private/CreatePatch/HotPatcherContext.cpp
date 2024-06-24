@@ -40,6 +40,11 @@ void FPackageTrackerByDiff::OnPackageCreated(UPackage* Package)
 	}
 }
 
+void FHotPatcherPatchContext::Init()
+{
+	FHotPatcherContext::Init();
+}
+
 FPatchVersionExternDiff* FHotPatcherPatchContext::GetPatcherDiffInfoByName(const FString& PlatformName)
 {
 	ETargetPlatform Platform;
@@ -96,6 +101,28 @@ FPlatformExternAssets* FHotPatcherPatchContext::GetPatcherChunkInfoByName(const 
 		}
 		return PlatformExternAssetsPtr;
 	}
+}
+
+bool FHotPatcherPatchContext::IsContainInBase(const FString& PlatformName, const FExternFileInfo& AddFile)
+{
+	SCOPED_NAMED_EVENT_TEXT("IsContainInBase",FColor::Red);
+	bool bContain = false;
+	ETargetPlatform Platform;
+	THotPatcherTemplateHelper::GetEnumValueByName(PlatformName,Platform);
+	if(!BaseVersion.PlatformAssets.Contains(Platform))
+	{
+		return false;
+	}
+	const FPlatformExternFiles& BaseVersionExternFiles = UFlibPatchParserHelper::GetAllExFilesByPlatform(BaseVersion.PlatformAssets[Platform],false,GetSettingObject()->GetHashCalculator());
+	for(const auto& BaseFile:BaseVersionExternFiles.ExternFiles)
+	{
+		if(BaseFile.IsSameMount(AddFile))
+		{
+			bContain = true;
+			break;
+		}
+	}
+	return bContain;
 }
 
 bool FHotPatcherPatchContext::AddAsset(const FString ChunkName, const FAssetDetail& AssetDetail)

@@ -3,10 +3,14 @@
 #include "FPlatformExternFiles.h"
 #include "HotPatcherLog.h"
 
-FHotPatcherSettingBase::FHotPatcherSettingBase():bAnalysisFilterDependencies(true),
-	AssetRegistryDependencyTypes(TArray<EAssetRegistryDependencyTypeEx>{EAssetRegistryDependencyTypeEx::Packages})
+#include "Misc/EngineVersionComparison.h"
+
+FHotPatcherSettingBase::FHotPatcherSettingBase()
 {
-	ForceSkipContentRules.Append(UFlibPatchParserHelper::GetDefaultForceSkipContentDir());
+	GetAssetScanConfigRef().bAnalysisFilterDependencies = true;
+	GetAssetScanConfigRef().AssetRegistryDependencyTypes = TArray<EAssetRegistryDependencyTypeEx>{EAssetRegistryDependencyTypeEx::Packages};
+	GetAssetScanConfigRef().ForceSkipContentRules.Append(UFlibPatchParserHelper::GetDefaultForceSkipContentDir());
+	SavePath.Path = TEXT("[PROJECTDIR]/Saved/HotPatcher/");
 }
 
 
@@ -24,20 +28,13 @@ void FHotPatcherSettingBase::Init()
 
 TArray<FExternFileInfo> FHotPatcherSettingBase::GetAllExternFilesByPlatform(ETargetPlatform InTargetPlatform,bool InGeneratedHash)
 {
-	TArray<FExternFileInfo> AllExternFiles = UFlibPatchParserHelper::ParserExDirectoryAsExFiles(GetAddExternDirectoryByPlatform(InTargetPlatform));
+	TArray<FExternFileInfo> AllExternFiles = UFlibPatchParserHelper::ParserExDirectoryAsExFiles(GetAddExternDirectoryByPlatform(InTargetPlatform),HashCalculator,InGeneratedHash);
 	
-	for (auto& ExFile : GetAddExternFilesByPlatform(InTargetPlatform))
+	for (auto& ExFile : GetAddExternFilesByPlatform(InTargetPlatform,InGeneratedHash))
 	{
 		if (!AllExternFiles.Contains(ExFile))
 		{
 			AllExternFiles.Add(ExFile);
-		}
-	}
-	if (InGeneratedHash)
-	{
-		for (auto& ExFile : AllExternFiles)
-		{
-			ExFile.GenerateFileHash();
 		}
 	}
 	return AllExternFiles;
@@ -55,7 +52,7 @@ TMap<ETargetPlatform,FPlatformExternFiles> FHotPatcherSettingBase::GetAllPlatfot
 	return result;
 }
 	
-TArray<FExternFileInfo> FHotPatcherSettingBase::GetAddExternFilesByPlatform(ETargetPlatform InTargetPlatform)
+TArray<FExternFileInfo> FHotPatcherSettingBase::GetAddExternFilesByPlatform(ETargetPlatform InTargetPlatform,bool InGeneratedHash)
 {
 	TArray<FExternFileInfo> result;
 	for(const auto& Platform:GetAddExternAssetsToPlatform())
@@ -65,7 +62,10 @@ TArray<FExternFileInfo> FHotPatcherSettingBase::GetAddExternFilesByPlatform(ETar
 			for(const auto& File:Platform.AddExternFileToPak)
 			{
 				uint32 index = result.Emplace(File);
-				result[index].FilePath.FilePath = UFlibPatchParserHelper::ReplaceMarkPath(File.FilePath.FilePath);
+				if(InGeneratedHash)
+				{
+					result[index].GenerateFileHash(HashCalculator);
+				}
 			}
 		}
 	}
@@ -94,16 +94,26 @@ FString FHotPatcherSettingBase::GetSaveAbsPath()const
 {
 	if (!SavePath.Path.IsEmpty())
 	{
-		return UFlibPatchParserHelper::ReplaceMarkPath(SavePath.Path);
+		return UFlibPatchParserHelper::ReplaceMarkPath(GetSavePath());
 	}
 	return TEXT("");
 }
 
-TArray<FString> FHotPatcherSettingBase::GetAllSkipContents() const
+FString FHotPatcherSettingBase::GetCombinedAdditionalCommandletArgs() const
+{
+	FString Result;
+	TArray<FString> Options = GetAdditionalCommandletArgs();
+#if UE_VERSION_OLDER_THAN(5,0,0)
+	Options.AddUnique(TEXT("-NoPostLoadCacheDDC"));
+#endif
+	Result = UFlibPatchParserHelper::MergeOptionsAsCmdline(Options);
+	return Result;
+}
 
+TArray<FString> FHotPatcherSettingBase::GetAllSkipContents() const
 {
 	TArray<FString> AllSkipContents;;
-	AllSkipContents.Append(UFlibAssetManageHelper::DirectoryPathsToStrings(GetForceSkipContentRules()));
+	AllSkipContents.Append(UFlibAssetManageHelper::DirectoriesToStrings(GetForceSkipContentRules()));
 	AllSkipContents.Append(UFlibAssetManageHelper::SoftObjectPathsToStrings(GetForceSkipAssets()));
 	return AllSkipContents;
 }

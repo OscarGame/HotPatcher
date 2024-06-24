@@ -22,7 +22,8 @@
 #include "FPakVersion.h"
 #include "FPlatformExternAssets.h"
 #include "BaseTypes/FCookShaderOptions.h"
-
+#include "BaseTypes/FAssetRegistryOptions.h"
+#include "BaseTypes.h"
 // engine header
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
@@ -33,58 +34,31 @@
 #include "Serialization/JsonSerializer.h"
 #include "FExportPatchSettings.generated.h"
 
-struct FEncryptSetting
-{
-	// -encryptindex
-	bool bEncryptIndex = false;
-	bool bEncryptAllAssetFiles = false;
-	bool bEncryptUAssetFiles = false;
-	bool bEncryptIniFiles = false;
-	// sign pak
-	bool bSign = false;
-};
 
-#define AS_PLUGINDIR_MARK TEXT("[PLUGINDIR]")
-
-
-
-UENUM(BlueprintType)
-enum class EAssetRegistryRule : uint8
-{
-	PATCH,
-	PER_CHUNK,
-	CUSTOM
-};
-
-
-USTRUCT(BlueprintType)
-struct HOTPATCHERRUNTIME_API FAssetRegistryOptions
+USTRUCT()
+struct HOTPATCHERRUNTIME_API FPatherResult
 {
 	GENERATED_BODY()
-	FAssetRegistryOptions()
-	{
-		AssetRegistryMountPointRegular = FString::Printf(TEXT("%s/AssetRegistry"),AS_PROJECTDIR_MARK);
-		AssetRegistryNameRegular = FString::Printf(TEXT("[CHUNK_NAME]_AssetRegistry.bin"));
-	}
-	FString GetAssetRegistryNameRegular(const FString& ChunkName)const
-	{
-		return AssetRegistryNameRegular.Replace(TEXT("[CHUNK_NAME]"),*ChunkName);
-	}
-	FString GetAssetRegistryMountPointRegular()const { return AssetRegistryMountPointRegular; }
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	bool bSerializeAssetRegistry = false;
-	
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	FString AssetRegistryMountPointRegular;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	EAssetRegistryRule AssetRegistryRule = EAssetRegistryRule::PATCH;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	bool bCustomAssetRegistryName = false;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite,meta=(EditCondition="bCustomAssetRegistryName"))
-	FString AssetRegistryNameRegular;
+	UPROPERTY()
+	TArray<FAssetDetail> PatcherAssetDetails;
 };
 
+USTRUCT(BlueprintType)
+struct FCookAdvancedOptions
+{
+	GENERATED_BODY()
+	FCookAdvancedOptions();
+	// ConcurrentSave for cooking
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	bool bCookParallelSerialize = false;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	int32 NumberOfAssetsPerFrame = 100;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	TMap<UClass*,int32> OverrideNumberOfAssetsPerFrame;
+	FORCEINLINE const TMap<UClass*,int32>& GetOverrideNumberOfAssetsPerFrame()const{ return OverrideNumberOfAssetsPerFrame; }
+	UPROPERTY(EditAnywhere)
+	bool bAccompanyCookForShader = false;
+};
 
 /** Singleton wrapper to allow for using the setting structure in SSettingsView */
 USTRUCT(BlueprintType)
@@ -118,7 +92,7 @@ public:
 	FORCEINLINE bool IsSaveDiffAnalysis()const { return IsByBaseVersion() && bStorageDiffAnalysisResults; }
 	FORCEINLINE TArray<FString> GetIgnoreDeletionModulesAsset()const{return IgnoreDeletionModulesAsset;}
 
-	FORCEINLINE bool IsPackageTracker()const { return bPackageTracker; }
+	// FORCEINLINE bool IsPackageTracker()const { return bPackageTracker; }
 	FORCEINLINE bool IsIncludeAssetRegistry()const { return bIncludeAssetRegistry; }
 	FORCEINLINE bool IsIncludeGlobalShaderCache()const { return bIncludeGlobalShaderCache; }
 	FORCEINLINE bool IsIncludeShaderBytecode()const { return bIncludeShaderBytecode; }
@@ -129,7 +103,7 @@ public:
 
 	FORCEINLINE bool IsByBaseVersion()const { return bByBaseVersion; }
 	FORCEINLINE bool IsEnableExternFilesDiff()const { return bEnableExternFilesDiff; }
-	FORCEINLINE bool IsIncludeHasRefAssetsOnly()const { return bIncludeHasRefAssetsOnly; }
+	
 	FORCEINLINE bool IsIncludePakVersion()const { return bIncludePakVersionFile; }
 
 	// chunk infomation
@@ -147,11 +121,11 @@ public:
 
 	FORCEINLINE bool IsCustomPakNameRegular()const {return bCustomPakNameRegular;}
 	FORCEINLINE FString GetPakNameRegular()const { return PakNameRegular;}
+	FORCEINLINE bool IsCustomPakPathRegular()const {return bCustomPakPathRegular;}
+	FORCEINLINE FString GetPakPathRegular()const { return PakPathRegular;}
 	FORCEINLINE bool IsCookPatchAssets()const {return bCookPatchAssets;}
 	FORCEINLINE bool IsIgnoreDeletedAssetsInfo()const {return bIgnoreDeletedAssetsInfo;}
 	FORCEINLINE bool IsSaveDeletedAssetsToNewReleaseJson()const {return bStorageDeletedAssetsToNewReleaseJson;}
-	
-	
 	
 	FORCEINLINE FIoStoreSettings GetIoStoreSettings()const { return IoStoreSettings; }
 	FORCEINLINE FUnrealPakSettings GetUnrealPakSettings()const {return UnrealPakSettings;}
@@ -163,7 +137,7 @@ public:
 
 	FORCEINLINE bool IsStorageNewRelease()const{return bStorageNewRelease;}
 	FORCEINLINE bool IsStoragePakFileInfo()const{return bStoragePakFileInfo;}
-	FORCEINLINE bool IsBackupMetadata()const {return bBackupMetadata;}
+	// FORCEINLINE bool IsBackupMetadata()const {return bBackupMetadata;}
 	FORCEINLINE bool IsEnableProfiling()const { return bEnableProfiling; }
 	
 	FORCEINLINE FPakEncryptSettings GetEncryptSettings()const{ return EncryptSettings; }
@@ -172,6 +146,10 @@ public:
 	FORCEINLINE bool IsSharedShaderLibrary()const { return GetCookShaderOptions().bSharedShaderLibrary; }
 	FORCEINLINE FCookShaderOptions GetCookShaderOptions()const {return CookShaderOptions;}
 	FORCEINLINE FAssetRegistryOptions GetSerializeAssetRegistryOptions()const{return SerializeAssetRegistryOptions;}
+	FORCEINLINE bool IsImportProjectSettings()const{ return bImportProjectSettings; }
+
+	virtual FString GetCombinedAdditionalCommandletArgs()const override;
+	virtual bool IsCookParallelSerialize() const { return CookAdvancedOptions.bCookParallelSerialize; }
 public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "BaseVersion")
 		bool bByBaseVersion = false;
@@ -179,7 +157,9 @@ public:
 		FFilePath BaseVersion;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite,Category = "PatchBaseSettings")
 		FString VersionId;
-
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Asset Filters")
+		bool bImportProjectSettings = false;
+	
 	// require HDiffPatchUE plugin
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "BinariesPatch")
 		bool bBinariesPatch = false;
@@ -190,7 +170,7 @@ public:
 	// UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Asset Filters",meta = (EditCondition = "!bAnalysisFilterDependencies"))
 	bool bAnalysisDiffAssetDependenciesOnly = false;
 	// allow tracking load asset when cooking
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Asset Filters")
+	// UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Asset Filters")
 		bool bPackageTracker = true;
 	// UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cooked Files")
 		bool bIncludeAssetRegistry = false;
@@ -243,6 +223,8 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pak Options")
 		bool bCookPatchAssets = true;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pak Options", meta=(EditCondition = "bCookPatchAssets"))
+		FCookAdvancedOptions CookAdvancedOptions;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pak Options", meta=(EditCondition = "bCookPatchAssets"))
 		FCookShaderOptions CookShaderOptions;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pak Options", meta=(EditCondition = "bCookPatchAssets"))
 		FAssetRegistryOptions SerializeAssetRegistryOptions;
@@ -271,6 +253,11 @@ public:
 	// Can use value: {VERSION} {BASEVERSION} {CHUNKNAME} {PLATFORM} 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pak Options",meta=(EditCondition = "bCustomPakNameRegular"))
 		FString PakNameRegular = TEXT("{VERSION}_{CHUNKNAME}_{PLATFORM}_001_P");
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pak Options")
+		bool bCustomPakPathRegular = false;
+	// Can use value: {VERSION} {BASEVERSION} {CHUNKNAME} {PLATFORM} 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pak Options",meta=(EditCondition = "bCustomPakPathRegular"))
+		FString PakPathRegular = TEXT("{CHUNKNAME}/{PLATFORM}");
 	
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SaveTo")
 		bool bStorageNewRelease = true;
@@ -283,14 +270,33 @@ public:
 		bool bStorageDeletedAssetsToNewReleaseJson = true;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SaveTo",meta=(EditCondition="bByBaseVersion"))
 		bool bStorageDiffAnalysisResults = true;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SaveTo")
+		bool bStorageUnrealPakList = true;
 	// UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SaveTo")
 	// 	bool bStorageAssetDependencies = false;
-	UPROPERTY(EditAnywhere,BlueprintReadWrite, Category = "SaveTo")
-		bool bBackupMetadata = false;
+	// UPROPERTY(EditAnywhere,BlueprintReadWrite, Category = "SaveTo")
+	// 	bool bBackupMetadata = false;
 
 	// UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Advanced")
 		bool bEnableMultiThread = false;
 	
 	UPROPERTY(EditAnywhere,BlueprintReadWrite, Category = "Advanced")
 		bool bEnableProfiling = false;
+	UPROPERTY(EditAnywhere,BlueprintReadWrite, Category = "Advanced")
+		FString StorageCookedDir = TEXT("[PROJECTDIR]/Saved/Cooked");
+
+	FString GetStorageCookedDir()const;
+	FString GetChunkSavedDir(const FString& InVersionId,const FString& InBaseVersionId,const FString& InChunkName,const FString& InPlatformName)const;
+	
+};
+
+struct HOTPATCHERRUNTIME_API FReplacePakRegular
+{
+	FReplacePakRegular()=default;
+	FReplacePakRegular(const FString& InVersionId,const FString& InBaseVersionId,const FString& InChunkName,const FString& InPlatformName):
+	VersionId(InVersionId),BaseVersionId(InBaseVersionId),ChunkName(InChunkName),PlatformName(InPlatformName){}
+	FString VersionId;
+	FString BaseVersionId;
+	FString ChunkName;
+	FString PlatformName;
 };

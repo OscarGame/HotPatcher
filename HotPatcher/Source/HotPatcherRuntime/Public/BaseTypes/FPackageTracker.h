@@ -2,8 +2,7 @@
 #include "FlibAssetManageHelper.h"
 #include "CoreMinimal.h"
 #include "UObject/UObjectArray.h"
-#include "HAL/PlatformFilemanager.h"
-#include "HAL/FileManager.h"
+#include "HotPatcherLog.h"
 
 struct FPackageTrackerBase : public FUObjectArray::FUObjectCreateListener, public FUObjectArray::FUObjectDeleteListener
 {
@@ -37,6 +36,9 @@ struct FPackageTrackerBase : public FUObjectArray::FUObjectCreateListener, publi
 
 			if (Package->GetOuter() == nullptr && !Package->GetFName().IsNone())
 			{
+				FName AssetPathName = FName(*Package->GetPathName());
+				LoadedPackages.Add(AssetPathName);
+				
 				OnPackageCreated(Package);
 			}
 		}
@@ -61,8 +63,8 @@ struct FPackageTrackerBase : public FUObjectArray::FUObjectCreateListener, publi
 		GUObjectArray.RemoveUObjectDeleteListener(this);
 		GUObjectArray.RemoveUObjectCreateListener(this);
 	}
-	virtual void OnPackageCreated(UPackage* Package) = 0;
-	virtual void OnPackageDeleted(UPackage* Package) = 0;
+	virtual void OnPackageCreated(UPackage* Package){};
+	virtual void OnPackageDeleted(UPackage* Package){};
 	virtual const TSet<FName>& GetLoadedPackages()const{ return LoadedPackages; }
 	
 protected:
@@ -71,34 +73,99 @@ protected:
 
 struct FPackageTracker : public FPackageTrackerBase
 {
-	FPackageTracker(TSet<FName>& InExisitAssets):ExisitAssets(InExisitAssets)
-	{}
+	FPackageTracker(TSet<FName>& InExisitAssets):ExisitAssets(InExisitAssets){}
 
 	virtual ~FPackageTracker(){}
 
 	virtual void OnPackageCreated(UPackage* Package) override
 	{
+		if(!IsTracking())
+		{
+			return;
+		}
 		FName AssetPathName = FName(*Package->GetPathName());
 		LoadedPackages.Add(AssetPathName);
 		if(!ExisitAssets.Contains(AssetPathName))
 		{
-			UE_LOG(LogHotPatcher,Display,TEXT("[PackageTracker] Add %s"),*AssetPathName.ToString());
-			PackagesPendingSave.Add(AssetPathName);
+			FString AssetPathNameStr = AssetPathName.ToString();
+			if(FPackageName::DoesPackageExist(AssetPathNameStr)
+#if WITH_UE5
+				 && !AssetPathNameStr.StartsWith(TEXT("/Game/__ExternalActors__")) &&
+				!AssetPathNameStr.StartsWith(TEXT("/Game/__ExternalObjects__"))
+#endif
+				)
+			{
+				UE_LOG(LogHotPatcher,Display,TEXT("[PackageTracker] Add %s"),*AssetPathNameStr);
+				AddTrackPackage(AssetPathName);
+			}
+			else
+			{
+				UE_LOG(LogHotPatcher,Verbose,TEXT("[PackageTracker] %s is not valid package!"),*AssetPathNameStr);
+			}
 		}
 	}
 	virtual void OnPackageDeleted(UPackage* Package) override
 	{
 		FName AssetPathName = FName(*Package->GetPathName());
-		if(PackagesPendingSave.Contains(AssetPathName))
-		{
-			PackagesPendingSave.Remove(AssetPathName);
-		}
+		RemoveTrackPackage(AssetPathName);
 	}
 	
 public:
 	// typedef TSet<UPackage*> PendingPackageSet;
+	const TSet<FName>& GetAdditionalPackageSet(){ return AdditionalPackageSet; }
 	const TSet<FName>& GetPendingPackageSet()const {return PackagesPendingSave; }
+	void CleanPaddingSet(){ PackagesPendingSave.Empty(); }
+	void SetTracking(bool bEnable){ bIsTracking = bEnable; }
+	bool IsTracking()const { return bIsTracking; }
 protected:
+	void AddTrackPackage(FName PackageName)
+	{
+		if(!AdditionalPackageSet.Contains(PackageName))
+		{
+			AdditionalPackageSet.Add(PackageName);
+			PackagesPendingSave.Add(PackageName);
+		}
+	}
+	void RemoveTrackPackage(FName PackageName)
+	{
+		AdditionalPackageSet.Remove(PackageName);
+		PackagesPendingSave.Remove(PackageName);
+	}
+	TSet<FName> AdditionalPackageSet;
 	TSet<FName>	 PackagesPendingSave;
 	TSet<FName>& ExisitAssets;
+	bool bIsTracking = true;
+};
+
+struct FClassesPackageTracker : public FPackageTrackerBase
+{
+	virtual void OnPackageCreated(UPackage* Package) override
+	{
+		FName ClassName = UFlibAssetManageHelper::GetAssetTypeByPackage(Package);
+		
+		if(!ClassMapping.Contains(ClassName))
+		{
+			ClassMapping.Add(ClassName,TArray<UPackage*>{});
+		}
+		ClassMapping.Find(ClassName)->AddUnique(Package);
+	};
+	virtual void OnPackageDeleted(UPackage* Package) override
+	{
+		FName ClassName = UFlibAssetManageHelper::GetAssetTypeByPackage(Package);
+		if(ClassMapping.Contains(ClassName))
+		{
+			ClassMapping.Find(ClassName)->Remove(Package);
+		}
+	}
+	TArray<UPackage*> GetPackagesByClassName(FName ClassName)
+	{
+		TArray<UPackage*> result;
+		if(ClassMapping.Contains(ClassName))
+		{
+			result = *ClassMapping.Find(ClassName);
+		}
+		return result;
+	}
+protected:
+	TMap<FName,TArray<UPackage*>> ClassMapping;
 };

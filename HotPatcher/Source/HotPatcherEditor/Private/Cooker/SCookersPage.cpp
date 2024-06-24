@@ -24,13 +24,16 @@ void SCookersPage::Construct(const FArguments& InArgs, TSharedPtr<FHotPatcherCon
 	// create cook modes menu
 	FMenuBuilder PatchModeMenuBuilder(true, NULL);
 	{
-		TMap<FString,FHotPatcherAction>* Cookers = FHotPatcherActionManager::Get().GetHotPatcherActions().Find(TEXT("Cooker"));
+		TMap<FString,FHotPatcherAction>* Cookers = FHotPatcherActionManager::Get().GetHotPatcherActions().Find(GetPageName());
 		if(Cookers)
 		{
 			for(const auto& Cooker:*Cookers)
 			{
-				FUIAction Action = FExecuteAction::CreateSP(this, &SCookersPage::HandleHotPatcherMenuEntryClicked, Cooker.Key,Cooker.Value.ActionCallback);
-				PatchModeMenuBuilder.AddMenuEntry(Cooker.Value.ActionName, Cooker.Value.ActionToolTip, Cooker.Value.Icon, Action);
+				if(FHotPatcherActionManager::Get().IsSupportEditorAction(Cooker.Key))
+				{
+					FUIAction Action = FExecuteAction::CreateSP(this, &SCookersPage::HandleHotPatcherMenuEntryClicked, Cooker.Key,Cooker.Value.ActionCallback);
+					PatchModeMenuBuilder.AddMenuEntry(Cooker.Value.ActionName, Cooker.Value.ActionToolTip, Cooker.Value.Icon, Action);
+				}
 			}
 		}
 	}
@@ -102,17 +105,21 @@ void SCookersPage::Construct(const FArguments& InArgs, TSharedPtr<FHotPatcherCon
 				]
 		];
 
-	TMap<FString,FHotPatcherAction>* Cookers = FHotPatcherActionManager::Get().GetHotPatcherActions().Find(TEXT("Cooker"));
+	TMap<FString,FHotPatcherAction>* Cookers = FHotPatcherActionManager::Get().GetHotPatcherActions().Find(GetPageName());
 	if(Cookers)
 	{
 		for(const auto& Cooker:*Cookers)
 		{
-			TSharedRef<SCompoundWidget> CookAction = Cooker.Value.RequestWidget(GetContext());
+			if(Cooker.Value.RequestWidget)
+			{
+				TSharedRef<SHotPatcherWidgetInterface> Action = Cooker.Value.RequestWidget(GetContext());
 		
-			Widget->AddSlot().AutoHeight().Padding(0.0, 8.0, 0.0, 0.0)
-			[
-				CookAction
-			];
+				Widget->AddSlot().AutoHeight().Padding(0.0, 8.0, 0.0, 0.0)
+				[
+					Action
+				];
+				ActionWidgetMap.Add(*Cooker.Key,Action);
+			}
 		}
 	}
 	ChildSlot
@@ -120,9 +127,19 @@ void SCookersPage::Construct(const FArguments& InArgs, TSharedPtr<FHotPatcherCon
 		Widget
 	];
 	
-	HandleHotPatcherMenuEntryClicked(TEXT("ByOriginal"),nullptr);
+	if(FHotPatcherAction* DefaultAction = FHotPatcherActionManager::Get().GetTopActionByCategory(GetPageName()))
+	{
+		HandleHotPatcherMenuEntryClicked(UKismetTextLibrary::Conv_TextToString(DefaultAction->ActionName.Get()),nullptr);
+	}
 }
 
+void SCookersPage::SelectToAction(const FString& ActionName)
+{
+	if(FHotPatcherActionManager::Get().IsContainAction(GetPageName(),ActionName))
+	{
+		HandleHotPatcherMenuEntryClicked(ActionName,nullptr);
+	}
+}
 
 EVisibility SCookersPage::HandleOperatorConfigVisibility()const
 {

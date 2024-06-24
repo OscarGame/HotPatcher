@@ -36,10 +36,13 @@ struct HOTPATCHERCORE_API FSingleCookerSettings:public FHotPatcherCookerSettingB
 {
 	GENERATED_BODY()
 public:
+	FSingleCookerSettings();
 	UPROPERTY(EditAnywhere,BlueprintReadWrite)
 	FString MissionName;
 	UPROPERTY(EditAnywhere,BlueprintReadWrite)
 	int32 MissionID = -1;
+	UPROPERTY(EditAnywhere,BlueprintReadWrite)
+	bool bShaderCooker = false;
 	UPROPERTY(EditAnywhere,BlueprintReadWrite)
 	FString ShaderLibName;
 
@@ -63,6 +66,9 @@ public:
 	// track load asset when cooking
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cooker")
 	bool bPackageTracker = true;
+	// cook load in cooking assets by SingleCookder side
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cooker",meta=(EditCondition="bPackageTracker"))
+	bool bCookPackageTrackerAssets = true;
 	
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cooker")
 	FCookerShaderOptions ShaderOptions;
@@ -75,9 +81,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cooker")
 	FIoStoreSettings IoStoreSettings;
 
-	// cook load in cooking assets by SingleCookder side
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cooker")
-	bool bCookAdditionalAssets = true;
+	bool bForceCookInOneFrame = false;
+	FORCEINLINE int32 GetNumberOfAssetsPerFrame()const{ return NumberOfAssetsPerFrame; }
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cooker",meta=(EditCondition="!bForceCookInOneFrame",ClampMin=0))
+	int32 NumberOfAssetsPerFrame = 100;
+	TMap<UClass*,int32> OverrideNumberOfAssetsPerFrame;
+	FORCEINLINE const TMap<UClass*,int32>& GetOverrideNumberOfAssetsPerFrame()const{ return OverrideNumberOfAssetsPerFrame; }
 	
 	// UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cooker")
 	bool bAsyncLoad = false;
@@ -85,15 +95,23 @@ public:
 	bool bPreGeneratePlatformData = false;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cooker",meta=(EditCondition="bPreGeneratePlatformData"))
 	bool bWaitEachAssetCompleted = true;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cooker",meta=(EditCondition="bPreGeneratePlatformData"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cooker",meta=(EditCondition="!bAsyncLoad"))
+	bool bCachePlatformDataOnly = false;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cooker",meta=(EditCondition="bPreGeneratePlatformData && !bCachePlatformDataOnly"))
 	bool bConcurrentSave = false;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cooker")
+	bool bAllowRegisteAdditionalWorker = false;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cooker")
+	bool bAccompanyCook = false;
 	
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
 	bool bDisplayConfig = false;
 
+	FString GetStorageCookedAbsDir()const;
 	UPROPERTY(EditAnywhere,BlueprintReadWrite)
 	FString StorageCookedDir;
-	
+
+	FString GetStorageMetadataAbsDir()const;
 	UPROPERTY(EditAnywhere,BlueprintReadWrite)
 	FString StorageMetadataDir;
 
@@ -105,16 +123,24 @@ public:
 	bool IsSkipAsset(const FString& PackageName);
 };
 
-
 USTRUCT(BlueprintType)
-struct HOTPATCHERCORE_API FAssetsCollection
+struct FPackagePathSet
 {
 	GENERATED_BODY()
-	UPROPERTY(EditAnywhere,BlueprintReadWrite)
-	ETargetPlatform TargetPlatform = ETargetPlatform::None;
-	UPROPERTY(EditAnywhere,BlueprintReadWrite)
-	TArray<FAssetDetail> Assets;
+
+	UPROPERTY()
+	TSet<FName> PackagePaths;
 };
+//
+// USTRUCT(BlueprintType)
+// struct HOTPATCHERCORE_API FAssetsCollection
+// {
+// 	GENERATED_BODY()
+// 	UPROPERTY(EditAnywhere,BlueprintReadWrite)
+// 	ETargetPlatform TargetPlatform = ETargetPlatform::None;
+// 	UPROPERTY(EditAnywhere,BlueprintReadWrite)
+// 	TArray<FAssetDetail> Assets;
+// };
 
 USTRUCT(BlueprintType)
 struct HOTPATCHERCORE_API FCookerFailedCollection
@@ -126,20 +152,5 @@ public:
 	UPROPERTY(EditAnywhere,BlueprintReadWrite)
 	int32 MissionID = -1;
 	UPROPERTY(EditAnywhere,BlueprintReadWrite)
-	TMap<ETargetPlatform,FAssetsCollection> CookFailedAssets;
+	TMap<ETargetPlatform,FPackagePathSet> CookFailedAssets;
 };
-
-
-FORCEINLINE bool FSingleCookerSettings::IsSkipAsset(const FString& PackageName)
-{
-	bool bRet = false;
-	for(const auto& SkipCookContent:SkipCookContents)
-	{
-		if(PackageName.StartsWith(SkipCookContent))
-		{
-			bRet = true;
-			break;
-		}
-	}
-	return bRet;
-}

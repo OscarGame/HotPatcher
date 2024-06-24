@@ -2,7 +2,12 @@
 #include "FlibAssetManageHelper.h"
 #include "HotPatcherLog.h"
 #include "FlibPatchParserHelper.h"
+#include "Engine/World.h"
 
+FCookAdvancedOptions::FCookAdvancedOptions()
+{
+	OverrideNumberOfAssetsPerFrame.Add(UWorld::StaticClass(),2);
+}
 
 FExportPatchSettings::FExportPatchSettings()
 	:bEnableExternFilesDiff(true),
@@ -15,6 +20,10 @@ FExportPatchSettings::FExportPatchSettings()
 		UFlibPatchParserHelper::GetProjectName(),
 		TEXT("Versions/version.json")
 	);
+#if WITH_UE5
+	StorageCookedDir = TEXT("[PROJECTDIR]/Saved/HotPatcher/Cooked");
+	bStandaloneMode = true;
+#endif
 }
 
 void FExportPatchSettings::Init()
@@ -80,19 +89,26 @@ FHotPatcherVersion FExportPatchSettings::GetNewPatchVersionInfo()
 	FHotPatcherVersion BaseVersionInfo;
 	GetBaseVersionInfo(BaseVersionInfo);
 
-	FHotPatcherVersion CurrentVersion = UFlibPatchParserHelper::ExportReleaseVersionInfo(
-        GetVersionId(),
-        BaseVersionInfo.VersionId,
-        FDateTime::UtcNow().ToString(),
-        UFlibAssetManageHelper::DirectoryPathsToStrings(GetAssetIncludeFilters()),
-			 UFlibAssetManageHelper::DirectoryPathsToStrings(GetAssetIgnoreFilters()),
-        GetAllSkipContents(),
-        GetForceSkipClasses(),
-        GetAssetRegistryDependencyTypes(),
-        GetIncludeSpecifyAssets(),
-        GetAddExternAssetsToPlatform(),
-        IsIncludeHasRefAssetsOnly()
-    );
+	FHotPatcherVersion CurrentVersion;
+	CurrentVersion.VersionId =  GetVersionId();
+	CurrentVersion.BaseVersionId = BaseVersionInfo.VersionId;
+	CurrentVersion.Date = FDateTime::UtcNow().ToString();
+	UFlibPatchParserHelper::RunAssetScanner(GetAssetScanConfig(),CurrentVersion);
+	UFlibPatchParserHelper::ExportExternAssetsToPlatform(GetAddExternAssetsToPlatform(),CurrentVersion,false,GetHashCalculator());
+	
+	// UFlibPatchParserHelper::ExportReleaseVersionInfo(
+ //        GetVersionId(),
+ //        BaseVersionInfo.VersionId,
+ //        FDateTime::UtcNow().ToString(),
+ //        UFlibAssetManageHelper::DirectoryPathsToStrings(GetAssetIncludeFilters()),
+	// 		 UFlibAssetManageHelper::DirectoryPathsToStrings(GetAssetIgnoreFilters()),
+ //        GetAllSkipContents(),
+ //        GetForceSkipClasses(),
+ //        GetAssetRegistryDependencyTypes(),
+ //        GetIncludeSpecifyAssets(),
+ //        GetAddExternAssetsToPlatform(),
+ //        IsIncludeHasRefAssetsOnly()
+ //    );
 
 	return CurrentVersion;
 }
@@ -113,11 +129,50 @@ bool FExportPatchSettings::GetBaseVersionInfo(FHotPatcherVersion& OutBaseVersion
 	return bDeserializeStatus;
 }
 
+FString FExportPatchSettings::GetChunkSavedDir(const FString& InVersionId,const FString& InBaseVersionId,const FString& InChunkName,const FString& InPlatformName)const
+{
+	FReplacePakRegular TmpPakPathRegular{
+		InVersionId,
+		InBaseVersionId,
+		InChunkName,
+		InPlatformName
+	};
+	FString ReplacedPakPathRegular = UFlibPatchParserHelper::ReplacePakRegular(TmpPakPathRegular,GetPakPathRegular());
+	return FPaths::Combine(GetSaveAbsPath(),ReplacedPakPathRegular);
+}
 
 FString FExportPatchSettings::GetCurrentVersionSavePath() const
 {
-	FString CurrentVersionSavePath = FPaths::Combine(GetSaveAbsPath(), /*const_cast<FExportPatchSettings*>(this)->GetNewPatchVersionInfo().*/VersionId);
+	FString CurrentVersionSavePath;
+	if(GetPakTargetPlatforms().Num())
+	{
+		FString PlatformName = THotPatcherTemplateHelper::GetEnumNameByValue(GetPakTargetPlatforms()[0]);
+		FString SavedBaseDir = GetChunkSavedDir(GetVersionId(),TEXT(""),GetVersionId(),PlatformName);
+		CurrentVersionSavePath = FPaths::Combine(SavedBaseDir,TEXT(".."));
+	}
+	else
+	{
+		CurrentVersionSavePath = FPaths::Combine(GetSaveAbsPath(), /*const_cast<FExportPatchSettings*>(this)->GetNewPatchVersionInfo().*/VersionId);
+	}
+	FPaths::NormalizeFilename(CurrentVersionSavePath);
 	return CurrentVersionSavePath;
+}
+
+FString FExportPatchSettings::GetCombinedAdditionalCommandletArgs() const
+{
+	return UFlibPatchParserHelper::MergeOptionsAsCmdline(TArray<FString>{
+		FHotPatcherSettingBase::GetCombinedAdditionalCommandletArgs(),
+		UFlibPatchParserHelper::GetTargetPlatformsCmdLine(GetPakTargetPlatforms()),
+		IsEnableProfiling() ? TEXT("-trace=cpu,loadtimetrace") : TEXT("")
+#if WITH_UE5
+		,TEXT("AssetGatherAll=true -logcmds=\"LogCookCommandlet Error,LogCook Error,LogAssetRegistryGenerator Error\"")
+#endif
+	});
+}
+
+FString FExportPatchSettings::GetStorageCookedDir() const
+{
+	return UFlibPatchParserHelper::ReplaceMark(StorageCookedDir);
 }
 
 TArray<FString> FExportPatchSettings::GetPakTargetPlatformNames() const

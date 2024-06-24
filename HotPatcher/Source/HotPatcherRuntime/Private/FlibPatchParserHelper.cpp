@@ -9,7 +9,7 @@
 #include "HotPatcherLog.h"
 #include "CreatePatch/FExportPatchSettings.h"
 #include "DependenciesParser/FDefaultAssetDependenciesParser.h"
-#include "DependenciesParser/FOldAssetDependenciesParser.h"
+#include "AssetRegistry.h"
 
 // engine header
 #include "Misc/App.h"
@@ -21,10 +21,14 @@
 #include "HAL/FileManager.h"
 #include "Engine/EngineTypes.h"
 #include "JsonObjectConverter.h"
-#include "AssetRegistryState.h"
+#include "FPackageTracker.h"
+#include "HotPatcherRuntime.h"
+#include "Async/ParallelFor.h"
 #include "CreatePatch/TimeRecorder.h"
 #include "Misc/Paths.h"
 #include "Kismet/KismetStringLibrary.h"
+#include "Misc/Base64.h"
+#include "Misc/FileHelper.h"
 #include "Serialization/LargeMemoryReader.h"
 
 TArray<FString> UFlibPatchParserHelper::GetAvailableMaps(FString GameName, bool IncludeEngineMaps, bool IncludePluginMaps, bool Sorted)
@@ -111,6 +115,15 @@ bool UFlibPatchParserHelper::DiffVersionAssets(
 		TArray<FString> InBaseAssetModuleKeysList;
 		InBaseVersion.AssetsDependenciesMap.GetKeys(InBaseAssetModuleKeysList);
 
+		auto InsertToDependenciesInfo = [](FAssetDependenciesInfo& OutAssetDependenciesInfo,const FString& InBaseVersionAssetModule,FString LongPackageName,const FAssetDetail& AssetDetail)
+		{
+			if (!OutAssetDependenciesInfo.AssetsDependenciesMap.Contains(InBaseVersionAssetModule))
+			{
+				OutAssetDependenciesInfo.AssetsDependenciesMap.Add(InBaseVersionAssetModule, FAssetDependenciesDetail{ InBaseVersionAssetModule,TMap<FString,FAssetDetail>{} });
+			}
+			OutAssetDependenciesInfo.AssetsDependenciesMap.Find(InBaseVersionAssetModule)->AssetDependencyDetails.Add(LongPackageName, AssetDetail);
+		};
+		
 		// Parser Add new asset
 		for (const auto& NewVersionAssetModule : InNewAssetModuleKeyList)
 		{
@@ -137,24 +150,19 @@ bool UFlibPatchParserHelper::DiffVersionAssets(
 					if (!BaseVersionDependAssetsList.Contains(NewAssetItem))
 					{
 						FString BelongModuneName = UFlibAssetManageHelper::GetAssetBelongModuleName(NewAssetItem);
-						if (!OutAddAsset.AssetsDependenciesMap.Contains(BelongModuneName))
-						{
-							OutAddAsset.AssetsDependenciesMap.Add(BelongModuneName, FAssetDependenciesDetail{ BelongModuneName,TMap<FString,FAssetDetail>{} });
-						}
-						TMap<FString, FAssetDetail>& CurrentModuleAssetDetails = OutAddAsset.AssetsDependenciesMap.Find(BelongModuneName)->AssetDependencyDetails;
-						CurrentModuleAssetDetails.Add(NewAssetItem, *NewVersionAssetModuleDetail.Find(NewAssetItem));
+						InsertToDependenciesInfo(OutAddAsset,BelongModuneName,NewAssetItem,*NewVersionAssetModuleDetail.Find(NewAssetItem));
 					}
 				}
 			}	
 		}
 
+		
 		// Parser Modify Asset
 		for (const auto& BaseVersionAssetModule : InBaseAssetModuleKeysList)
 		{
 			const FAssetDependenciesDetail& BaseVersionModuleAssetsDetail = *InBaseVersion.AssetsDependenciesMap.Find(BaseVersionAssetModule);
 			const FAssetDependenciesDetail& NewVersionModuleAssetsDetail = *InNewVersion.AssetsDependenciesMap.Find(BaseVersionAssetModule);
-
-
+			
 			if (InNewVersion.AssetsDependenciesMap.Contains(BaseVersionAssetModule))
 			{
 				TArray<FString> BeseVersionCurrentModuleAssetListKeys;
@@ -166,22 +174,14 @@ bool UFlibPatchParserHelper::DiffVersionAssets(
 					const FAssetDetail* NewVersionAssetDetail = NewVersionModuleAssetsDetail.AssetDependencyDetails.Find(AssetItem);
 					if (!NewVersionAssetDetail)
 					{
-						if (!OutDeleteAsset.AssetsDependenciesMap.Contains(BaseVersionAssetModule))
-						{
-							OutDeleteAsset.AssetsDependenciesMap.Add(BaseVersionAssetModule, FAssetDependenciesDetail{ BaseVersionAssetModule,TMap<FString,FAssetDetail>{} });
-						}
-						OutDeleteAsset.AssetsDependenciesMap.Find(BaseVersionAssetModule)->AssetDependencyDetails.Add(AssetItem, *BaseVersionAssetDetail);
+						InsertToDependenciesInfo(OutDeleteAsset,BaseVersionAssetModule,AssetItem,*BaseVersionAssetDetail);
 						continue;
 					}
 
 					if (!(*NewVersionAssetDetail == *BaseVersionAssetDetail))
 					{
 						UE_LOG(LogHotPatcher,Display,TEXT("Modify Asset: %s"),*AssetItem);
-						if (!OutModifyAsset.AssetsDependenciesMap.Contains(BaseVersionAssetModule))
-						{
-							OutModifyAsset.AssetsDependenciesMap.Add(BaseVersionAssetModule, FAssetDependenciesDetail{ BaseVersionAssetModule,TMap<FString,FAssetDetail>{} });
-						}
-						OutModifyAsset.AssetsDependenciesMap.Find(BaseVersionAssetModule)->AssetDependencyDetails.Add(AssetItem, *NewVersionAssetDetail);
+						InsertToDependenciesInfo(OutModifyAsset,BaseVersionAssetModule,AssetItem,*NewVersionAssetDetail);
 					}
 				}
 			}
@@ -194,6 +194,7 @@ bool UFlibPatchParserHelper::DiffVersionAssets(
 
 
 bool UFlibPatchParserHelper::DiffVersionAllPlatformExFiles(
+	const FExportPatchSettings& PatchSetting,
 	const FHotPatcherVersion& InBaseVersion,const FHotPatcherVersion& InNewVersion, TMap<ETargetPlatform, FPatchVersionExternDiff>& OutDiff)
 {
 	OutDiff.Empty();
@@ -260,8 +261,8 @@ bool UFlibPatchParserHelper::DiffVersionAllPlatformExFiles(
 		if(InBaseVersion.PlatformAssets.Contains(Platform))
 		{
 			OutDiff.Add(Platform,ParserDiffPlatformExFileLambda(
-				UFlibPatchParserHelper::GetAllExFilesByPlatform(InBaseVersion.PlatformAssets[Platform],false),
-				UFlibPatchParserHelper::GetAllExFilesByPlatform(InNewVersion.PlatformAssets[Platform]),
+				UFlibPatchParserHelper::GetAllExFilesByPlatform(InBaseVersion.PlatformAssets[Platform],false,PatchSetting.GetHashCalculator()),
+				UFlibPatchParserHelper::GetAllExFilesByPlatform(InNewVersion.PlatformAssets[Platform],true,PatchSetting.GetHashCalculator()),
 				Platform
 			));
 		}
@@ -271,7 +272,7 @@ bool UFlibPatchParserHelper::DiffVersionAllPlatformExFiles(
 			EmptyBase.Platform = Platform;
 			OutDiff.Add(Platform,ParserDiffPlatformExFileLambda(
 				EmptyBase,
-                UFlibPatchParserHelper::GetAllExFilesByPlatform(InNewVersion.PlatformAssets[Platform],true),
+                UFlibPatchParserHelper::GetAllExFilesByPlatform(InNewVersion.PlatformAssets[Platform],true,PatchSetting.GetHashCalculator()),
                 Platform
             ));
 		}
@@ -285,7 +286,7 @@ bool UFlibPatchParserHelper::DiffVersionAllPlatformExFiles(
 			FPlatformExternFiles EmptyNew;
 			EmptyNew.Platform = Platform;
 			OutDiff.Add(Platform,ParserDiffPlatformExFileLambda(
-                UFlibPatchParserHelper::GetAllExFilesByPlatform(InBaseVersion.PlatformAssets[Platform]),
+                UFlibPatchParserHelper::GetAllExFilesByPlatform(InBaseVersion.PlatformAssets[Platform],false,PatchSetting.GetHashCalculator()),
                 EmptyNew,
                 Platform
             ));
@@ -295,26 +296,24 @@ bool UFlibPatchParserHelper::DiffVersionAllPlatformExFiles(
 }
 
 FPlatformExternFiles UFlibPatchParserHelper::GetAllExFilesByPlatform(
-	const FPlatformExternAssets& InPlatformConf,bool InGeneratedHash)
+	const FPlatformExternAssets& InPlatformConf, bool InGeneratedHash, EHashCalculator HashCalculator)
 {
 	FPlatformExternFiles result;
-	result.ExternFiles = UFlibPatchParserHelper::ParserExDirectoryAsExFiles(InPlatformConf.AddExternDirectoryToPak);
+	result.ExternFiles = UFlibPatchParserHelper::ParserExDirectoryAsExFiles(InPlatformConf.AddExternDirectoryToPak,HashCalculator,InGeneratedHash);
 
 	for (auto& ExFile : InPlatformConf.AddExternFileToPak)
 	{
 		// ignore FPaths::FileExists(ExFile.FilePath.FilePath) 
-		if (!ExFile.FilePath.FilePath.IsEmpty() && !result.ExternFiles.Contains(ExFile))
+		if (!ExFile.GetReplaceMarkdFilePath().IsEmpty() && !result.ExternFiles.Contains(ExFile))
 		{
 			FExternFileInfo CurrentFile = ExFile;
-			CurrentFile.FilePath.FilePath = UFlibPatchParserHelper::ReplaceMarkPath(ExFile.FilePath.FilePath);
+			// CurrentFile.FilePath.FilePath = UFlibPatchParserHelper::ReplaceMarkPath(ExFile.FilePath.FilePath);
+			// CurrentFile.MountPath = ExFile.MountPath;
+			if (InGeneratedHash)
+			{
+				CurrentFile.GenerateFileHash(HashCalculator);
+			}
 			result.ExternFiles.Add(CurrentFile);
-		}
-	}
-	if (InGeneratedHash)
-	{
-		for (auto& ExFile : result.ExternFiles)
-		{
-			ExFile.GenerateFileHash();
 		}
 	}
 	return result;
@@ -525,26 +524,26 @@ bool UFlibPatchParserHelper::ConvNotAssetFileToPakCommand(
 	return bRunStatus;
 }
 
-bool UFlibPatchParserHelper::ConvNotAssetFileToExFile(const FString& InProjectDir, const FString& InPlatformName, const FString& InCookedFile, FExternFileInfo& OutExFile)
-{
-	bool bRunStatus = false;
-	if (FPaths::FileExists(InCookedFile))
-	{
-		FString CookPlatformAbsPath = FPaths::Combine(InProjectDir, TEXT("Saved/Cooked"), InPlatformName);
-
-		FString RelativePath = UKismetStringLibrary::GetSubstring(InCookedFile, CookPlatformAbsPath.Len() + 1, InCookedFile.Len() - CookPlatformAbsPath.Len());
-		FString AssetFileRelativeCookPath = FString::Printf(
-			TEXT("../../../%s"),
-			*RelativePath
-		);
-
-		OutExFile.FilePath.FilePath = InCookedFile;
-		OutExFile.MountPath = AssetFileRelativeCookPath;
-		OutExFile.GetFileHash();
-		bRunStatus = true;
-	}
-	return bRunStatus;
-}
+// bool UFlibPatchParserHelper::ConvNotAssetFileToExFile(const FString& InProjectDir, const FString& InPlatformName, const FString& InCookedFile, FExternFileInfo& OutExFile)
+// {
+// 	bool bRunStatus = false;
+// 	if (FPaths::FileExists(InCookedFile))
+// 	{
+// 		FString CookPlatformAbsPath = FPaths::Combine(InProjectDir, TEXT("Saved/Cooked"), InPlatformName);
+//
+// 		FString RelativePath = UKismetStringLibrary::GetSubstring(InCookedFile, CookPlatformAbsPath.Len() + 1, InCookedFile.Len() - CookPlatformAbsPath.Len());
+// 		FString AssetFileRelativeCookPath = FString::Printf(
+// 			TEXT("../../../%s"),
+// 			*RelativePath
+// 		);
+//
+// 		OutExFile.FilePath.FilePath = InCookedFile;
+// 		OutExFile.MountPath = AssetFileRelativeCookPath;
+// 		OutExFile.GetFileHash();
+// 		bRunStatus = true;
+// 	}
+// 	return bRunStatus;
+// }
 
 FString UFlibPatchParserHelper::HashStringWithSHA1(const FString &InString)
 {
@@ -618,7 +617,7 @@ TArray<FString> UFlibPatchParserHelper::GetEnabledPluginConfigs(const FString& I
 }
 
 
-TArray<FExternFileInfo> UFlibPatchParserHelper::ParserExDirectoryAsExFiles(const TArray<FExternDirectoryInfo>& InExternDirectorys)
+TArray<FExternFileInfo> UFlibPatchParserHelper::ParserExDirectoryAsExFiles(const TArray<FExternDirectoryInfo>& InExternDirectorys,EHashCalculator HashCalculator,bool InGeneratedHash)
 {
 	TArray<FExternFileInfo> result;
 
@@ -630,7 +629,8 @@ TArray<FExternFileInfo> UFlibPatchParserHelper::ParserExDirectoryAsExFiles(const
 		if(DirectoryItem.DirectoryPath.Path.IsEmpty())
 			continue;
 		FString DirAbsPath = UFlibPatchParserHelper::ReplaceMarkPath(DirectoryItem.DirectoryPath.Path); //FPaths::ConvertRelativePathToFull(DirectoryItem.DirectoryPath.Path);
-		
+		bool bWildcard = DirectoryItem.bWildcard;
+		FString Wildcard = DirectoryItem.WildcardStr;
 		FPaths::MakeStandardFilename(DirAbsPath);
 		if (!DirAbsPath.IsEmpty() && FPaths::DirectoryExists(DirAbsPath))
 		{
@@ -638,19 +638,28 @@ TArray<FExternFileInfo> UFlibPatchParserHelper::ParserExDirectoryAsExFiles(const
 			if (UFlibAssetManageHelper::FindFilesRecursive(DirAbsPath, DirectoryAllFiles, true))
 			{
 				int32 ParentDirectoryIndex = DirAbsPath.Len();
-				for (const auto& File : DirectoryAllFiles)
+				for (const FString& File : DirectoryAllFiles)
 				{
 					FString RelativeParentPath = UKismetStringLibrary::GetSubstring(File, ParentDirectoryIndex, File.Len() - ParentDirectoryIndex);
 					FString RelativeMountPointPath = FPaths::Combine(DirectoryItem.MountPoint, RelativeParentPath);
 					FPaths::MakeStandardFilename(RelativeMountPointPath);
 
 					FExternFileInfo CurrentFile;
-					CurrentFile.FilePath.FilePath = File;
-
+					CurrentFile.SetFilePath(File);
 					CurrentFile.MountPath = RelativeMountPointPath;
-					if (!result.Contains(CurrentFile))
+					if(InGeneratedHash)
+					{
+						CurrentFile.GenerateFileHash(HashCalculator);
+					}
+					bool bCanAdd = true;
+					if(bWildcard)
+					{
+						bCanAdd = File.MatchesWildcard(Wildcard) && RelativeMountPointPath.MatchesWildcard(Wildcard);
+					}
+					if (!result.Contains(CurrentFile) && bCanAdd)
+					{
 						result.Add(CurrentFile);
-
+					}
 				}
 			}
 		}
@@ -737,24 +746,24 @@ TArray<FString> UFlibPatchParserHelper::GetCookedFilesByPakInternalInfo(const FP
 }
 
 
-TArray<FExternFileInfo> UFlibPatchParserHelper::GetInternalFilesAsExFiles(const FPakInternalInfo& InPakInternalInfo, const FString& InPlatformName)
-{
-	TArray<FExternFileInfo> resultFiles;
-
-	TArray<FString> AllNeedPakInternalCookedFiles;
-
-	FString ProjectAbsDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
-	AllNeedPakInternalCookedFiles.Append(UFlibPatchParserHelper::GetCookedFilesByPakInternalInfo(InPakInternalInfo, InPlatformName));
-
-	for (const auto& File : AllNeedPakInternalCookedFiles)
-	{
-		FExternFileInfo CurrentFile;
-		UFlibPatchParserHelper::ConvNotAssetFileToExFile(ProjectAbsDir,InPlatformName, File, CurrentFile);
-		resultFiles.Add(CurrentFile);
-	}
-
-	return resultFiles;
-}
+// TArray<FExternFileInfo> UFlibPatchParserHelper::GetInternalFilesAsExFiles(const FPakInternalInfo& InPakInternalInfo, const FString& InPlatformName)
+// {
+// 	TArray<FExternFileInfo> resultFiles;
+//
+// 	TArray<FString> AllNeedPakInternalCookedFiles;
+//
+// 	FString ProjectAbsDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+// 	AllNeedPakInternalCookedFiles.Append(UFlibPatchParserHelper::GetCookedFilesByPakInternalInfo(InPakInternalInfo, InPlatformName));
+//
+// 	for (const auto& File : AllNeedPakInternalCookedFiles)
+// 	{
+// 		FExternFileInfo CurrentFile;
+// 		UFlibPatchParserHelper::ConvNotAssetFileToExFile(ProjectAbsDir,InPlatformName, File, CurrentFile);
+// 		resultFiles.Add(CurrentFile);
+// 	}
+//
+// 	return resultFiles;
+// }
 
 TArray<FString> UFlibPatchParserHelper::GetPakCommandsFromInternalInfo(
 	const FPakInternalInfo& InPakInternalInfo, 
@@ -909,107 +918,23 @@ TMap<ETargetPlatform,FPlatformExternFiles> UFlibPatchParserHelper::GetAllPlatfor
 }
 
 FChunkAssetDescribe UFlibPatchParserHelper::CollectFChunkAssetsDescribeByChunk(
+	const FHotPatcherSettingBase* PatcheSettings,
 	const FPatchVersionDiff& DiffInfo,
-	const FChunkInfo& Chunk,
-	TArray<ETargetPlatform> Platforms
-	)
+	const FChunkInfo& Chunk, TArray<ETargetPlatform> Platforms
+)
 {
+	SCOPED_NAMED_EVENT_TEXT("CollectFChunkAssetsDescribeByChunk",FColor::Red);
 	FChunkAssetDescribe ChunkAssetDescribe;
-	// Collect Chunk Assets
+	
 	{
-
-		auto GetAssetFilterPaths = [](const TArray<FDirectoryPath>& InFilters)->TArray<FString>
-		{
-			TArray<FString> Result;
-			for (const auto& Filter : InFilters)
-			{
-				if (!Filter.Path.IsEmpty())
-				{
-					FString FinalFilter = Filter.Path;
-					if(!Filter.Path.EndsWith(TEXT("/")))
-					{
-						FinalFilter = FString::Printf(TEXT("%s/"),*FinalFilter);
-					}
-					Result.AddUnique(FinalFilter);
-				}
-			}
-			return Result;
-		};
-		FAssetDependenciesInfo SpecifyDependAssets;
-		
-		FAssetDependenciesParser Parser;
-		FAssetDependencies Conf;
-		Conf.InIncludeSpecifyAsset = Chunk.IncludeSpecifyAssets;
-		
-		Parser.Parse(Conf);
-		TSet<FName> AssetLongPackageNames = Parser.GetrParseResults();
-		
-		TArray<FString> AssetFilterPaths = GetAssetFilterPaths(Chunk.AssetIncludeFilters);
-		// AssetFilterPaths.Append(GetSpecifyAssets(Chunk.IncludeSpecifyAssets));
-		// AssetFilterPaths.Append(SpecifyDependAssets.GetAssetLongPackageNames());
-		for(FName LongPackageName:AssetLongPackageNames)
-		{
-			if(LongPackageName.IsNone())
-				continue;
-			AssetFilterPaths.AddUnique(LongPackageName.ToString());
-		}
-
-		const FAssetDependenciesInfo& AddAssetsRef = DiffInfo.AssetDiffInfo.AddAssetDependInfo;
-		const FAssetDependenciesInfo& ModifyAssetsRef = DiffInfo.AssetDiffInfo.ModifyAssetDependInfo;
-
-
-		auto CollectChunkAssets = [](const FAssetDependenciesInfo& SearchBase, const TArray<FString>& SearchFilters)->FAssetDependenciesInfo
-		{
-			FAssetDependenciesInfo ResultAssetDependInfos;
-
-			for (const auto& SearchItem : SearchFilters)
-			{
-				if (SearchItem.IsEmpty())
-					continue;
-
-				FString SearchModuleName;
-				int32 findedPos = SearchItem.Find(TEXT("/"), ESearchCase::IgnoreCase, ESearchDir::FromStart, 1);
-				if (findedPos != INDEX_NONE)
-				{
-					SearchModuleName = UKismetStringLibrary::GetSubstring(SearchItem, 1, findedPos - 1);
-				}
-				else
-				{
-					SearchModuleName = UKismetStringLibrary::GetSubstring(SearchItem, 1, SearchItem.Len() - 1);
-				}
-
-				if (!SearchModuleName.IsEmpty() && (SearchBase.AssetsDependenciesMap.Contains(SearchModuleName)))
-				{
-					if (!ResultAssetDependInfos.AssetsDependenciesMap.Contains(SearchModuleName))
-						ResultAssetDependInfos.AssetsDependenciesMap.Add(SearchModuleName, FAssetDependenciesDetail(SearchModuleName, TMap<FString, FAssetDetail>{}));
-
-					const FAssetDependenciesDetail& SearchBaseModule = *SearchBase.AssetsDependenciesMap.Find(SearchModuleName);
-
-					TArray<FString> AllAssetKeys;
-					SearchBaseModule.AssetDependencyDetails.GetKeys(AllAssetKeys);
-
-					for (const auto& KeyItem : AllAssetKeys)
-					{
-						if (KeyItem.StartsWith(SearchItem))
-						{
-							FAssetDetail FindedAsset = *SearchBaseModule.AssetDependencyDetails.Find(KeyItem);
-							if (!ResultAssetDependInfos.AssetsDependenciesMap.Find(SearchModuleName)->AssetDependencyDetails.Contains(KeyItem))
-							{
-								ResultAssetDependInfos.AssetsDependenciesMap.Find(SearchModuleName)->AssetDependencyDetails.Add(KeyItem, FindedAsset);
-							}
-						}
-					}
-				}
-			}
-			return ResultAssetDependInfos;
-		};
-		ChunkAssetDescribe.AddAssets = CollectChunkAssets(AddAssetsRef, AssetFilterPaths);
-		ChunkAssetDescribe.ModifyAssets = CollectChunkAssets(ModifyAssetsRef, AssetFilterPaths);
+		ChunkAssetDescribe.AddAssets = DiffInfo.AssetDiffInfo.AddAssetDependInfo; // CollectChunkAssets(AddAssetsRef, AssetFilterPaths);
+		ChunkAssetDescribe.ModifyAssets = DiffInfo.AssetDiffInfo.ModifyAssetDependInfo; //CollectChunkAssets(ModifyAssetsRef, AssetFilterPaths);
 		ChunkAssetDescribe.Assets = UFlibAssetManageHelper::CombineAssetDependencies(ChunkAssetDescribe.AddAssets, ChunkAssetDescribe.ModifyAssets);
 	}
 
 	auto CoolectPlatformExFiles = [](const FPatchVersionDiff& DiffInfo,const auto& Chunk,ETargetPlatform Platform)->TArray<FExternFileInfo>
 	{
+		SCOPED_NAMED_EVENT_TEXT("CoolectPlatformExFiles",FColor::Red);
 		// Collect Extern Files
 		TArray<FExternFileInfo> AllFiles;
 
@@ -1024,9 +949,9 @@ FChunkAssetDescribe UFlibPatchParserHelper::CollectFChunkAssetsDescribeByChunk(
 						if (!Directory.DirectoryPath.Path.IsEmpty())
 							AllSearchFileFilter.Add(UFlibPatchParserHelper::ReplaceMarkPath(Directory.DirectoryPath.Path));
 					}
-					for (const auto& File : Chunk.AddExternAssetsToPlatform[PlatformIndex].AddExternFileToPak)
+					for (const FExternFileInfo& File : Chunk.AddExternAssetsToPlatform[PlatformIndex].AddExternFileToPak)
 					{
-						AllSearchFileFilter.Add(UFlibPatchParserHelper::ReplaceMarkPath(File.FilePath.FilePath));
+						AllSearchFileFilter.Add(File.GetReplaceMarkdFilePath());
 					}
 				}
 			}
@@ -1046,7 +971,7 @@ FChunkAssetDescribe UFlibPatchParserHelper::CollectFChunkAssetsDescribeByChunk(
 			{
 				for (const auto& SearchItem : SearchBase)
 				{
-					if (SearchItem.FilePath.FilePath.StartsWith(Filter))
+					if (SearchItem.GetReplaceMarkdFilePath().StartsWith(Filter))
 					{
 						FExternFileInfo FileItem = SearchItem;
 						FileItem.Type = Type;
@@ -1101,16 +1026,17 @@ TArray<FPakCommand> UFlibPatchParserHelper::CollectPakCommandByChunk(
 	const FExportPatchSettings* PatcheSettings
 )
 {
-	auto CollectPakCommandsByChunkLambda = [PatcheSettings](const FPatchVersionDiff& DiffInfo, const FChunkInfo& Chunk, const FString& PlatformName/*, const TArray<FString>& PakOptions*/)->TArray<FPakCommand>
+	SCOPED_NAMED_EVENT_TEXT("CollectPakCommandByChunk",FColor::Red);
+	TArray<FPakCommand> PakCommands;
+	auto CollectPakCommandsByChunkLambda = [&PakCommands,PatcheSettings](const FPatchVersionDiff& DiffInfo, const FChunkInfo& Chunk, const FString& PlatformName/*, const TArray<FString>& PakOptions*/)
 	{
+		SCOPED_NAMED_EVENT_TEXT("CollectPakCommandsByChunkLambda",FColor::Red);
 		ETargetPlatform Platform;
 		THotPatcherTemplateHelper::GetEnumValueByName(PlatformName,Platform);
 		TArray<ETargetPlatform> CollectPlatforms = {ETargetPlatform::AllPlatforms};
 		CollectPlatforms.AddUnique(Platform);
-		FChunkAssetDescribe ChunkAssetsDescrible = UFlibPatchParserHelper::CollectFChunkAssetsDescribeByChunk(DiffInfo, Chunk ,CollectPlatforms);
-
-		TArray<FPakCommand> PakCommands;
-
+		FChunkAssetDescribe ChunkAssetsDescrible = UFlibPatchParserHelper::CollectFChunkAssetsDescribeByChunk(PatcheSettings, DiffInfo ,Chunk, CollectPlatforms);
+		
 		bool bIoStore =false;
 		bool bAllowBulkDataInIoStore = false;
 #if ENGINE_MAJOR_VERSION > 4 ||ENGINE_MINOR_VERSION > 25
@@ -1151,8 +1077,9 @@ TArray<FPakCommand> UFlibPatchParserHelper::CollectPakCommandByChunk(
 			struct PakCommandReceiver
 			{
 				PakCommandReceiver(TArray<FPakCommand>& InPakCommandsRef,EPatchAssetType InType):PakCommands(InPakCommandsRef),Type(InType){}
-				void operator()(const TArray<FString>& InPakCommand,const TArray<FString>& InIoStoreCommand, const FString& InMountPath,const FString& InLongPackageName)
+				void operator()(const TArray<FString>& InPakCommand,const TArray<FString>& InIoStoreCommand, const FString& InMountPath,const FString& InLongPackageName,FCriticalSection& LockSynchronizationObject)
 				{
+					FScopeLock Lock(&LockSynchronizationObject);
 					FPakCommand CurrentPakCommand;
 					CurrentPakCommand.PakCommands = InPakCommand;
 					CurrentPakCommand.IoStoreCommands = InIoStoreCommand;
@@ -1163,31 +1090,26 @@ TArray<FPakCommand> UFlibPatchParserHelper::CollectPakCommandByChunk(
 				}
 				TArray<FPakCommand>& PakCommands;
 				EPatchAssetType Type;
+				;
+		
 			};
-			// auto ReceivePakCommandAssetLambda = [&PakCommands](const TArray<FString>& InPakCommand,const TArray<FString>& InIoStoreCommand, const FString& InMountPath,const FString& InLongPackageName)
-			// {
-			// 	
-			// };
+			
 			PakCommandReceiver AddReceiver(PakCommands,EPatchAssetType::NEW);
 			PakCommandReceiver ModifyReceiver(PakCommands,EPatchAssetType::MODIFY);
 			FString ProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
-			TArray<FString> AssetsPakCommands;
 			UFlibAssetManageHelper::MakePakCommandFromAssetDependencies(
 				ProjectDir,
+				PatcheSettings->GetStorageCookedDir(),
 				PlatformName,
 				ChunkAssetsDescrible.AddAssets,
-				// PakOptions,
-				AssetsPakCommands,
 				AddReceiver,
 				IsIoStoreAssetsLambda
 			);
-			AssetsPakCommands.Empty();
 			UFlibAssetManageHelper::MakePakCommandFromAssetDependencies(
 				ProjectDir,
+				PatcheSettings->GetStorageCookedDir(),
 				PlatformName,
 				ChunkAssetsDescrible.ModifyAssets,
-				// PakOptions,
-				AssetsPakCommands,
 				ModifyReceiver,
 				IsIoStoreAssetsLambda
 			);
@@ -1213,7 +1135,7 @@ TArray<FPakCommand> UFlibPatchParserHelper::CollectPakCommandByChunk(
 				// 	PakOptionsStr += TEXT(" ") + Param;
 				// }
 				
-				CurrentPakCommand.PakCommands = TArray<FString>{ FString::Printf(TEXT("\"%s\" \"%s\""), *CollectFile.FilePath.FilePath, *CollectFile.MountPath/*,*PakOptionsStr*/) };
+				CurrentPakCommand.PakCommands = TArray<FString>{ FString::Printf(TEXT("\"%s\" \"%s\""), *CollectFile.GetReplaceMarkdFilePath(), *CollectFile.MountPath/*,*PakOptionsStr*/) };
 				CurrentPakCommand.Type = CollectFile.Type;
 				PakCommands.Add(CurrentPakCommand);
 			}
@@ -1224,27 +1146,27 @@ TArray<FPakCommand> UFlibPatchParserHelper::CollectPakCommandByChunk(
 		// 	NotCompressOptions.Remove(TEXT("-compress"));
 		auto ReceivePakCommandExFilesLambda = [&PakCommands](const FPakCommand& InCommand){ PakCommands.Emplace(InCommand); };
 		UFlibPatchParserHelper::GetPakCommandsFromInternalInfo(ChunkAssetsDescrible.InternalFiles, PlatformName,/* NotCompressOptions,*/ ReceivePakCommandExFilesLambda);
-		return PakCommands;
 	};
-
-	return CollectPakCommandsByChunkLambda(DiffInfo, Chunk, PlatformName/*, PakOptions*/);
+	CollectPakCommandsByChunkLambda(DiffInfo, Chunk, PlatformName/*, PakOptions*/);
+	return PakCommands;
 }
 
-FHotPatcherVersion UFlibPatchParserHelper::ExportReleaseVersionInfo(
+FHotPatcherVersion UFlibPatchParserHelper::ExportReleaseVersionInfoByChunk(
 	const FString& InVersionId,
 	const FString& InBaseVersion,
 	const FString& InDate,
-	const TArray<FString>& InIncludeFilter,
-	const TArray<FString>& InIgnoreFilter,
-	const TArray<FString>& ForceSkipContents,
-	const TArray<UClass*>& ForceSkipClasses,
-	const TArray<EAssetRegistryDependencyTypeEx>& AssetRegistryDependencyTypes,
-	const TArray<FPatcherSpecifyAsset>& InIncludeSpecifyAsset,
-	const TArray<FPlatformExternAssets>& AddToPlatformExFiles,
-	bool InIncludeHasRefAssetsOnly,
-	bool bInAnalysisFilterDependencies
-)
+	const FChunkInfo& InChunkInfo,
+	bool InIncludeHasRefAssetsOnly /*= false */,
+	bool bInAnalysisFilterDependencies /* = true*/
+	, EHashCalculator HashCalculator)
 {
+	TArray<FString> AllSkipContents;;
+	if(InChunkInfo.bForceSkipContent)
+	{
+		AllSkipContents.Append(UFlibAssetManageHelper::DirectoriesToStrings(InChunkInfo.ForceSkipContentRules));
+		AllSkipContents.Append(UFlibAssetManageHelper::SoftObjectPathsToStrings(InChunkInfo.ForceSkipAssets));
+	}
+
 	SCOPED_NAMED_EVENT_TEXT("ExportReleaseVersionInfo",FColor::Red);
 	FHotPatcherVersion ExportVersion;
 	{
@@ -1252,55 +1174,88 @@ FHotPatcherVersion UFlibPatchParserHelper::ExportReleaseVersionInfo(
 		ExportVersion.Date = InDate;
 		ExportVersion.BaseVersionId = InBaseVersion;
 	}
-	
+
+	FAssetScanConfig ScanConfig;
+	ScanConfig.bPackageTracker = false;
+	ScanConfig.AssetIncludeFilters = InChunkInfo.AssetIncludeFilters;
+	ScanConfig.AssetIgnoreFilters = InChunkInfo.AssetIgnoreFilters;
+	ScanConfig.bAnalysisFilterDependencies = bInAnalysisFilterDependencies;
+	ScanConfig.bRecursiveWidgetTree = false;
+	ScanConfig.IncludeSpecifyAssets = InChunkInfo.IncludeSpecifyAssets;
+	ScanConfig.bForceSkipContent = InChunkInfo.bForceSkipContent;
+	ScanConfig.ForceSkipAssets = InChunkInfo.ForceSkipAssets;
+	ScanConfig.ForceSkipClasses = InChunkInfo.ForceSkipClasses;
+	ScanConfig.ForceSkipContentRules = InChunkInfo.ForceSkipContentRules;
+	ScanConfig.AssetRegistryDependencyTypes = InChunkInfo.AssetRegistryDependencyTypes;
+	ScanConfig.bIncludeHasRefAssetsOnly = InIncludeHasRefAssetsOnly;
+	RunAssetScanner(ScanConfig,ExportVersion);
+
+	bool CalcHash = HashCalculator == EHashCalculator::NoHash ? false : true;
+	ExportExternAssetsToPlatform(InChunkInfo.AddExternAssetsToPlatform,ExportVersion,CalcHash,HashCalculator);
+
+	return ExportVersion;
+}
+
+void UFlibPatchParserHelper::RunAssetScanner(FAssetScanConfig ScanConfig,FHotPatcherVersion& ExportVersion)
+{
+	SCOPED_NAMED_EVENT_TEXT("UFlibPatchParserHelper::RunAssetScanner",FColor::Red);
+
+	TSharedPtr<FPackageTrackerBase> ObjectTracker;
+	if(ScanConfig.bPackageTracker)
+	{
+		ObjectTracker = MakeShareable(new FPackageTrackerBase);
+	}
 	// add Include Filter
 	{
 		TArray<FString> AllIncludeFilter;
-		for (const auto& Filter : InIncludeFilter)
+		for (const auto& Filter : ScanConfig.AssetIncludeFilters)
 		{
-			AllIncludeFilter.AddUnique(Filter);
-			ExportVersion.IncludeFilter.AddUnique(Filter);
+			AllIncludeFilter.AddUnique(Filter.Path);
+			ExportVersion.IncludeFilter.AddUnique(Filter.Path);
 		}
 	}
 	// add Ignore Filter
 	{
 		TArray<FString> AllIgnoreFilter;
-		for (const auto& Filter : InIgnoreFilter)
+		for (const auto& Filter : ScanConfig.AssetIgnoreFilters)
 		{
-			AllIgnoreFilter.AddUnique(Filter);
-			ExportVersion.IgnoreFilter.AddUnique(Filter);
+			AllIgnoreFilter.AddUnique(Filter.Path);
+			ExportVersion.IgnoreFilter.AddUnique(Filter.Path);
 		}
 	}
-	ExportVersion.bIncludeHasRefAssetsOnly = InIncludeHasRefAssetsOnly;
-	ExportVersion.IncludeSpecifyAssets = InIncludeSpecifyAsset;
-	
-	// for (const auto& File : InAllExternFiles)
-	// {
-	// 	if (!ExportVersion.ExternalFiles.Contains(File.FilePath.FilePath))
-	// 	{
-	// 		ExportVersion.ExternalFiles.Add(File.MountPath, File);
-	// 	}
-	// }
+	ExportVersion.bIncludeHasRefAssetsOnly = ScanConfig.bIncludeHasRefAssetsOnly;
+	ExportVersion.IncludeSpecifyAssets = ScanConfig.IncludeSpecifyAssets;
 
 	TSet<FName> IgnoreTypes = 
 	{
 		TEXT("EditorUtilityBlueprint")
 	};
-	for(auto Class:ForceSkipClasses)
-	{
-		IgnoreTypes.Add(*Class->GetName());
-	}
-	FAssetDependencies AssetConfig;
-	AssetConfig.IncludeFilters = ExportVersion.IncludeFilter;
-	AssetConfig.IgnoreFilters = ExportVersion.IgnoreFilter;
-	AssetConfig.AssetRegistryDependencyTypes = AssetRegistryDependencyTypes;
-	AssetConfig.InIncludeSpecifyAsset = InIncludeSpecifyAsset;
-	AssetConfig.ForceSkipContents = ForceSkipContents;
-	AssetConfig.bRedirector = true;
-	AssetConfig.AnalysicFilterDependencies = bInAnalysisFilterDependencies;
-	AssetConfig.IncludeHasRefAssetsOnly = InIncludeHasRefAssetsOnly;
-	AssetConfig.IgnoreAseetTypes = IgnoreTypes;
 	
+	FAssetDependencies AssetConfig;
+	AssetConfig.IncludeFilters = UFlibAssetManageHelper::NormalizeContentDirs(ExportVersion.IncludeFilter);
+	AssetConfig.IgnoreFilters = UFlibAssetManageHelper::NormalizeContentDirs(ExportVersion.IgnoreFilter);
+	
+	AssetConfig.AssetRegistryDependencyTypes = ScanConfig.AssetRegistryDependencyTypes;
+	AssetConfig.InIncludeSpecifyAsset = ScanConfig.IncludeSpecifyAssets;
+
+	
+	if(ScanConfig.bForceSkipContent)
+	{
+		TArray<FString> AllSkipContents;;
+		AllSkipContents.Append(UFlibAssetManageHelper::DirectoriesToStrings(ScanConfig.ForceSkipContentRules));
+		for(auto Class:ScanConfig.ForceSkipClasses)
+		{
+			IgnoreTypes.Add(*Class->GetName());
+		}
+		AssetConfig.ForceSkipContents = UFlibAssetManageHelper::NormalizeContentDirs(AllSkipContents);
+		AssetConfig.ForceSkipPackageNames = UFlibAssetManageHelper::SoftObjectPathsToStringsSet(ScanConfig.ForceSkipAssets);
+	}
+	
+	AssetConfig.bRedirector = true;
+	AssetConfig.AnalysicFilterDependencies = ScanConfig.bAnalysisFilterDependencies;
+	AssetConfig.IncludeHasRefAssetsOnly = ScanConfig.bIncludeHasRefAssetsOnly;
+	AssetConfig.IgnoreAseetTypes = IgnoreTypes;
+	AssetConfig.bSupportWorldComposition = ScanConfig.bSupportWorldComposition;
 	{
 		SCOPED_NAMED_EVENT_TEXT("parser all uasset dependencies(optimized)",FColor::Red);
 		FAssetDependenciesParser Parser;
@@ -1310,85 +1265,71 @@ FHotPatcherVersion UFlibPatchParserHelper::ExportReleaseVersionInfo(
 
 		{
 			SCOPED_NAMED_EVENT_TEXT("combine all assets to FAssetDependenciesInfo",FColor::Red);
-			for(FName LongPackageName:Parser.GetrParseResults())
+			FCriticalSection	SynchronizationObject;
+			const TArray<FName>& ParseResultSet = Parser.GetrParseResults().Array();
+			ParallelFor(Parser.GetrParseResults().Num(),[&](int32 index)
 			{
+				FName LongPackageName = ParseResultSet[index];
 				if(LongPackageName.IsNone())
-					continue;
+				{
+					return;
+				}
 				FAssetDetail CurrentDetail;
 				if(UFlibAssetManageHelper::GetSpecifyAssetDetail(LongPackageName.ToString(),CurrentDetail))
 				{
-					ExportVersion.AssetInfo.AddAssetsDetail(CurrentDetail);
+					UFlibAssetManageHelper::IsRedirector(CurrentDetail,CurrentDetail);
+					{
+						FScopeLock Lock(&SynchronizationObject);
+						ExportVersion.AssetInfo.AddAssetsDetail(CurrentDetail);
+					}
 				}
-			}
+			},GForceSingleThread);
 		}
 	}
 	
-	// {
-	// 	SCOPED_NAMED_EVENT_TEXT("parser all uasset dependencies(Old)",FColor::Red);
-	// 	FOldAssetDependenciesParser Parser;
-	// 	Parser.Parse(AssetConfig);
-	//
-	// 	{
-	// 		SCOPED_NAMED_EVENT_TEXT("calac all uasset num (old)",FColor::Red);
-	// 		TArray<FAssetDetail> AssetDetails;
-	// 		UFlibAssetManageHelper::GetAssetDetailsByAssetDependenciesInfo(Parser.GetrParseResults(),AssetDetails);
-	// 		UE_LOG(LogHotPatcher,Display,TEXT("FAssetDependenciteParser Asset Num (old) %d"),AssetDetails.Num());
-	// 	}
-	// 	// ExportVersion.AssetInfo = Parser.GetrParseResults();
-	// }
-	
+	if(ObjectTracker && ScanConfig.bPackageTracker)
 	{
-		SCOPED_NAMED_EVENT_TEXT("ExportReleaseVersionInfo parser external files",FColor::Red);
-		for(const auto& PlatformExInfo:AddToPlatformExFiles)
+		SCOPED_NAMED_EVENT_TEXT("Combine Package Tracker Assets",FColor::Red);
+		const TArray<FName> LoadedPackages = ObjectTracker->GetLoadedPackages().Array();
+		
+		FCriticalSection	SynchronizationObject;
+		ParallelFor(LoadedPackages.Num(),[&](int32 index)
 		{
-			FPlatformExternFiles PlatformFileInfo = UFlibPatchParserHelper::GetAllExFilesByPlatform(PlatformExInfo);
-			FPlatformExternAssets PlatformExternAssets;
-			PlatformExternAssets.TargetPlatform = PlatformExInfo.TargetPlatform;
-			PlatformExternAssets.AddExternFileToPak = PlatformFileInfo.ExternFiles;
-			ExportVersion.PlatformAssets.Add(PlatformExInfo.TargetPlatform,PlatformExternAssets);
-		}
+			FAssetDetail LoadedPackageDetail = UFlibAssetManageHelper::GetAssetDetailByPackageName(LoadedPackages[index].ToString());
+			UFlibAssetManageHelper::IsRedirector(LoadedPackageDetail,LoadedPackageDetail);
+			
+			{
+				FScopeLock Lock(&SynchronizationObject);
+				ExportVersion.AssetInfo.AddAssetsDetail(LoadedPackageDetail);
+			}
+		},GForceSingleThread);
 	}
-	return ExportVersion;
 }
 
-FHotPatcherVersion UFlibPatchParserHelper::ExportReleaseVersionInfoByChunk(
-	const FString& InVersionId,
-	const FString& InBaseVersion,
-	const FString& InDate,
-	const FChunkInfo& InChunkInfo,
-	bool InIncludeHasRefAssetsOnly /*= false */,
-	bool bInAnalysisFilterDependencies /* = true*/)
+void UFlibPatchParserHelper::ExportExternAssetsToPlatform(
+	const TArray<FPlatformExternAssets>& AddExternAssetsToPlatform, FHotPatcherVersion& ExportVersion, bool
+	bGenerateHASH, EHashCalculator HashCalculator)
 {
-	TArray<FString> AllSkipContents;;
-	if(InChunkInfo.bForceSkipContent)
+	SCOPED_NAMED_EVENT_TEXT("UFlibPatchParserHelper::ExportExternAssetsToPlatform",FColor::Red);
+	for(const auto& PlatformExInfo:AddExternAssetsToPlatform)
 	{
-		AllSkipContents.Append(UFlibAssetManageHelper::DirectoryPathsToStrings(InChunkInfo.ForceSkipContentRules));
-		AllSkipContents.Append(UFlibAssetManageHelper::SoftObjectPathsToStrings(InChunkInfo.ForceSkipAssets));
+		FPlatformExternFiles PlatformFileInfo = UFlibPatchParserHelper::GetAllExFilesByPlatform(PlatformExInfo,bGenerateHASH,HashCalculator);
+		FPlatformExternAssets PlatformExternAssets;
+		PlatformExternAssets.TargetPlatform = PlatformExInfo.TargetPlatform;
+		PlatformExternAssets.AddExternFileToPak = PlatformFileInfo.ExternFiles;
+		ExportVersion.PlatformAssets.Add(PlatformExInfo.TargetPlatform,PlatformExternAssets);
 	}
-	
-	return UFlibPatchParserHelper::ExportReleaseVersionInfo(
-        InVersionId,
-        InBaseVersion,
-        InDate,
-        UFlibPatchParserHelper::GetDirectoryPaths(InChunkInfo.AssetIncludeFilters),
-        UFlibPatchParserHelper::GetDirectoryPaths(InChunkInfo.AssetIgnoreFilters),
-        AllSkipContents,
-        InChunkInfo.ForceSkipClasses,
-        InChunkInfo.AssetRegistryDependencyTypes,
-        InChunkInfo.IncludeSpecifyAssets,
-        InChunkInfo.AddExternAssetsToPlatform,
-        InIncludeHasRefAssetsOnly,
-        bInAnalysisFilterDependencies
-    );
 }
 
 TArray<FString> UFlibPatchParserHelper::GetPakCommandStrByCommands(const TArray<FPakCommand>& PakCommands,const TArray<FReplaceText>& InReplaceTexts,bool bIoStore)
 {
+	SCOPED_NAMED_EVENT_TEXT("UFlibPatchParserHelper::ExportExternAssetsToPlatform",FColor::Red);
 	TArray<FString> ResultPakCommands;
 	{
-		for (const auto& PakCommand : PakCommands)
+		FCriticalSection	SynchronizationObject;
+		ParallelFor(PakCommands.Num(),[&](int32 index)
 		{
-			const TArray<FString>& PakCommandOriginTexts = bIoStore?PakCommand.GetIoStoreCommands():PakCommand.GetPakCommands();
+			const TArray<FString>& PakCommandOriginTexts = bIoStore?PakCommands[index].GetIoStoreCommands():PakCommands[index].GetPakCommands();
 			if (!!InReplaceTexts.Num())
 			{
 				for (const auto& PakCommandOriginText : PakCommandOriginTexts)
@@ -1399,14 +1340,18 @@ TArray<FString> UFlibPatchParserHelper::GetPakCommandStrByCommands(const TArray<
 						ESearchCase::Type SearchCaseMode = ReplaceText.SearchCase == ESearchCaseMode::CaseSensitive ? ESearchCase::CaseSensitive : ESearchCase::IgnoreCase;
 						PakCommandTargetText = PakCommandTargetText.Replace(*ReplaceText.From, *ReplaceText.To, SearchCaseMode);
 					}
-					ResultPakCommands.Add(PakCommandTargetText);
+					{
+						FScopeLock Lock(&SynchronizationObject);
+						ResultPakCommands.Add(PakCommandTargetText);
+					}
 				}
 			}
 			else
 			{
+				FScopeLock Lock(&SynchronizationObject);
 				ResultPakCommands.Append(PakCommandOriginTexts);
 			}
-		}
+		},GForceSingleThread);
 	}
 	return ResultPakCommands;
 }
@@ -1514,11 +1459,11 @@ bool UFlibPatchParserHelper::GetCookProcCommandParams(const FCookerConfig& InCon
 	return true;
 }
 
-void UFlibPatchParserHelper::ExcludeContentForVersionDiff(FPatchVersionDiff& VersionDiff,const TArray<FString>& ExcludeRules)
+void UFlibPatchParserHelper::ExcludeContentForVersionDiff(FPatchVersionDiff& VersionDiff,const TArray<FString>& ExcludeRules,EHotPatcherMatchModEx matchMod)
 {
-	UFlibAssetManageHelper::ExcludeContentForAssetDependenciesDetail(VersionDiff.AssetDiffInfo.AddAssetDependInfo,ExcludeRules);
-	UFlibAssetManageHelper::ExcludeContentForAssetDependenciesDetail(VersionDiff.AssetDiffInfo.ModifyAssetDependInfo,ExcludeRules);
-	UFlibAssetManageHelper::ExcludeContentForAssetDependenciesDetail(VersionDiff.AssetDiffInfo.DeleteAssetDependInfo,ExcludeRules);
+	UFlibAssetManageHelper::ExcludeContentForAssetDependenciesDetail(VersionDiff.AssetDiffInfo.AddAssetDependInfo,ExcludeRules,matchMod);
+	UFlibAssetManageHelper::ExcludeContentForAssetDependenciesDetail(VersionDiff.AssetDiffInfo.ModifyAssetDependInfo,ExcludeRules,matchMod);
+	UFlibAssetManageHelper::ExcludeContentForAssetDependenciesDetail(VersionDiff.AssetDiffInfo.DeleteAssetDependInfo,ExcludeRules,matchMod);
 }
 
 FString UFlibPatchParserHelper::MountPathToRelativePath(const FString& InMountPath)
@@ -1564,31 +1509,46 @@ TMap<FString, FString> UFlibPatchParserHelper::GetReplacePathMarkMap()
 FString UFlibPatchParserHelper::ReplaceMark(const FString& Src)
 {
 	TMap<FString,FString> MarkMap = UFlibPatchParserHelper::GetReplacePathMarkMap();
-	auto ReplaceStringMark = [&MarkMap](const FString& OriginDir)->FString
-	{
-		TArray<FString> MarkKeys;
-		MarkMap.GetKeys(MarkKeys);
+	TArray<FString> MarkKeys;
+	MarkMap.GetKeys(MarkKeys);
 		
-		FString result = OriginDir;
-		for(const auto& Key:MarkKeys)
+	FString result = Src;
+	for(const auto& Key:MarkKeys)
+	{
+		while(result.Contains(Key))
 		{
-			if(OriginDir.StartsWith(Key))
-			{
-				result = OriginDir;
-				result.RemoveFromStart(Key,ESearchCase::IgnoreCase);
-				result = FPaths::Combine(MarkMap[Key],result);
-				break;
-			}
+			result = result.Replace(*Key,*FPaths::ConvertRelativePathToFull(*MarkMap.Find(Key)));
 		}
-		return result;
-	};
-	return ReplaceStringMark(Src);
+	}
+	FPaths::NormalizeFilename(result);
+	FPaths::CollapseRelativeDirectories(result);
+	return result;
 }
+
 FString UFlibPatchParserHelper::ReplaceMarkPath(const FString& Src)
 {
 	FString result = UFlibPatchParserHelper::ReplaceMark(Src);
 	FPaths::MakeStandardFilename(result);
 	result = FPaths::ConvertRelativePathToFull(result);
+	return result;
+}
+
+FString UFlibPatchParserHelper::MakeMark(const FString& Src)
+{
+	TMap<FString,FString> MarkMap = UFlibPatchParserHelper::GetReplacePathMarkMap();
+	TArray<FString> MarkKeys;
+	MarkMap.GetKeys(MarkKeys);
+		
+	FString result = Src;
+	for(const auto& Key:MarkKeys)
+	{
+		FString ReplacedMark = FPaths::ConvertRelativePathToFull(*MarkMap.Find(Key));
+		if(Src.Contains(ReplacedMark))
+		{
+			result = result.Replace(*ReplacedMark,*Key);
+			break;
+		}
+	}
 	return result;
 }
 
@@ -1598,7 +1558,7 @@ void UFlibPatchParserHelper::ReplacePatherSettingProjectDir(TArray<FPlatformExte
 	{
 		for(auto& ExFile:ExPlatform.AddExternFileToPak)
 		{
-			ExFile.FilePath.FilePath = UFlibPatchParserHelper::ReplaceMarkPath(ExFile.FilePath.FilePath);
+			ExFile.SetFilePath(ExFile.GetFilePath());
 		}
 		for(auto& ExDir:ExPlatform.AddExternDirectoryToPak)
 		{
@@ -1886,7 +1846,7 @@ FPakEncryptionKeys UFlibPatchParserHelper::GetCryptoByProjectSettings()
 		for(TFieldIterator<FProperty> PropertyIter(Class);PropertyIter;++PropertyIter)
 		{
 			FProperty* PropertyIns = *PropertyIter;
-			UE_LOG(LogTemp,Log,TEXT("%s"),*PropertyIns->GetName());
+			// UE_LOG(LogHotPatcher,Log,TEXT("%s"),*PropertyIns->GetName());
 			if(PropertyIns->GetName().Equals(ENCRYPT_KEY_NAME))
 			{
 				result.EncryptionKey.Key = *PropertyIns->ContainerPtrToValuePtr<FString>(Class->GetDefaultObject());
@@ -1961,7 +1921,7 @@ FEncryptSetting UFlibPatchParserHelper::GetCryptoSettingByPakEncryptSettings(con
 	}
 	else
 	{
-		FString CryptoKeyFile = FPaths::ConvertRelativePathToFull(Config.CryptoKeys.FilePath);
+		FString CryptoKeyFile = UFlibPatchParserHelper::ReplaceMark(Config.CryptoKeys.FilePath);
 		if(FPaths::FileExists(CryptoKeyFile))
 		{
 			FEncryptSetting CryptoJsonSettings = UFlibPatchParserHelper::GetCryptoSettingsByJson(CryptoKeyFile);
@@ -1986,13 +1946,255 @@ bool UFlibPatchParserHelper::SerializePakEncryptionKeyToFile(const FPakEncryptio
 TArray<FDirectoryPath> UFlibPatchParserHelper::GetDefaultForceSkipContentDir()
 {
 	TArray<FDirectoryPath> result;
-	TArray<FString> DefaultSkipEditorContentRules = {TEXT("/Engine/Editor"),TEXT("/Engine/VREditor")};
-	for(const auto& Ruls:DefaultSkipEditorContentRules)
+	TArray<FString> DefaultSkipEditorContentRules = {
+		TEXT("/Engine/Editor*/")
+		,TEXT("/Engine/VREditor/")
+	};
+
+	TArray<FString> AlwaySkipTempContentRules = {
+#if ENGINE_MAJOR_VERSION
+		TEXT("/Game/__ExternalActors__")
+		,TEXT("/Game/__ExternalObjects__")
+#endif
+	};
+	
+	auto AddToSkipDirs = [&result](const TArray<FString>& SkipDirs)
 	{
-		FDirectoryPath PathIns;
-		PathIns.Path = Ruls;
-		result.Add(PathIns);
+		for(const auto& Ruls:SkipDirs)
+		{
+			FDirectoryPath PathIns;
+			PathIns.Path = Ruls;
+			result.Add(PathIns);
+		}
+	};
+	AddToSkipDirs(AlwaySkipTempContentRules);
+
+	bool bSkipEditorContent = false;
+	GConfig->GetBool(TEXT("/Script/UnrealEd.ProjectPackagingSettings"),TEXT("bSkipEditorContent"),bSkipEditorContent,GGameIni);
+
+	if(bSkipEditorContent)
+	{
+		AddToSkipDirs(DefaultSkipEditorContentRules);
 	}
+	
 	return result;
 }
 
+FSHAHash UFlibPatchParserHelper::FileSHA1Hash(const FString& Filename)
+{
+	FSHAHash Hash;
+	FSHA1::GetFileSHAHash(*Filename,Hash.Hash,true);
+	TArray<uint8> Data;
+	FFileHelper::LoadFileToArray(Data,*Filename);
+	FSHA1::HashBuffer(Data.GetData(),Data.Num(),Hash.Hash);
+	return Hash;
+}
+
+FString UFlibPatchParserHelper::FileHash(const FString& Filename, EHashCalculator Calculator)
+{
+	FString HashValue;
+	
+	FString FileAbsPath = FPaths::ConvertRelativePathToFull(Filename);
+	if (FPaths::FileExists(FileAbsPath))
+	{
+		switch (Calculator)
+		{
+		case EHashCalculator::MD5:
+			{
+				FMD5Hash FileMD5Hash = FMD5Hash::HashFile(*FileAbsPath);
+				HashValue = LexToString(FileMD5Hash);
+				break;
+			}
+		case  EHashCalculator::SHA1:
+			{
+				FSHAHash Hash = UFlibPatchParserHelper::FileSHA1Hash(Filename);
+				HashValue = Hash.ToString();
+				break;
+			}
+		};
+	}
+	return HashValue;
+}
+
+bool UFlibPatchParserHelper::IsValidPatchSettings(const FExportPatchSettings* PatchSettings,bool bExternalFilesCheck)
+{
+	bool bCanExport = false;
+	FExportPatchSettings* NoConstSettingObject = const_cast<FExportPatchSettings*>(PatchSettings);
+	if (NoConstSettingObject)
+	{
+		bool bHasBase = false;
+		if (NoConstSettingObject->IsByBaseVersion())
+			bHasBase = !NoConstSettingObject->GetBaseVersion().IsEmpty() && FPaths::FileExists(NoConstSettingObject->GetBaseVersion());
+		else
+			bHasBase = true;
+		bool bHasVersionId = !NoConstSettingObject->GetVersionId().IsEmpty();
+		bool bHasFilter = !!NoConstSettingObject->GetAssetIncludeFilters().Num();
+		bool bHasSpecifyAssets = !!NoConstSettingObject->GetIncludeSpecifyAssets().Num();
+		bool bHasSavePath = !NoConstSettingObject->GetSaveAbsPath().IsEmpty();
+		bool bHasPakPlatfotm = !!NoConstSettingObject->GetPakTargetPlatforms().Num();
+
+		bool bHasExternFiles = true;
+		if(bExternalFilesCheck)
+		{
+			bHasExternFiles = !!NoConstSettingObject->GetAllPlatfotmExternFiles().Num();
+		}
+		
+		bool bHasExDirs = !!NoConstSettingObject->GetAddExternAssetsToPlatform().Num();
+		
+		bool bHasAnyPakFiles = (
+			bHasFilter || bHasSpecifyAssets || bHasExternFiles || bHasExDirs ||
+			NoConstSettingObject->IsIncludeEngineIni() ||
+			NoConstSettingObject->IsIncludePluginIni() ||
+			NoConstSettingObject->IsIncludeProjectIni() ||
+			NoConstSettingObject->bImportProjectSettings
+			);
+		bCanExport = bHasBase && bHasVersionId && bHasAnyPakFiles && bHasPakPlatfotm && bHasSavePath;
+	}
+	return bCanExport;
+}
+
+FString UFlibPatchParserHelper::GetTargetPlatformsStr(const TArray<ETargetPlatform>& Platforms)
+{
+	FString PlatformArrayStr;
+	TArray<ETargetPlatform> UniquePlatforms;
+	for(ETargetPlatform Platform:Platforms){ UniquePlatforms.AddUnique(Platform);}
+	for(ETargetPlatform Platform:UniquePlatforms)
+	{
+		FString PlatformName = THotPatcherTemplateHelper::GetEnumNameByValue(Platform);
+		PlatformArrayStr += FString::Printf(TEXT("%s+"),*PlatformName);
+	}
+	PlatformArrayStr.RemoveFromEnd(TEXT("+"));
+	return PlatformArrayStr;
+}
+
+FString UFlibPatchParserHelper::GetTargetPlatformsCmdLine(const TArray<ETargetPlatform>& Platforms)
+{
+	FString Result;
+	if(Platforms.Num())
+	{
+		FString PlatformArrayStr = UFlibPatchParserHelper::GetTargetPlatformsStr(Platforms);
+		if(!PlatformArrayStr.IsEmpty())
+		{
+			Result = FString::Printf(TEXT("-TargetPlatform=%s"),*PlatformArrayStr);
+		}
+	}
+	return Result;
+}
+
+void UFlibPatchParserHelper::SetPropertyTransient(UStruct* Struct,const FString& PropertyName,bool bTransient)
+{
+	for(TFieldIterator<FProperty> PropertyIter(Struct);PropertyIter;++PropertyIter)
+	{
+		FProperty* PropertyIns = *PropertyIter;
+		if(PropertyName.Equals(*PropertyIns->GetName(),ESearchCase::IgnoreCase))
+		{
+			if(bTransient)
+			{
+				PropertyIns->SetPropertyFlags(CPF_Transient);
+			}
+			else
+			{
+				PropertyIns->ClearPropertyFlags(CPF_Transient);
+			}
+			break;
+		}
+	}
+}
+
+FString UFlibPatchParserHelper::MergeOptionsAsCmdline(const TArray<FString>& InOptions)
+{
+	FString Cmdline;
+	for(const auto& Option:InOptions)
+	{
+		FString InOption = Option;
+		while(InOption.RemoveFromStart(TEXT(" "))){}
+		while(InOption.RemoveFromEnd(TEXT(" "))){}
+		if(!InOption.IsEmpty())
+		{
+			Cmdline += FString::Printf(TEXT("%s "),*InOption);
+		}
+	}
+	Cmdline.RemoveFromEnd(TEXT(" "));
+	return Cmdline;
+};
+
+FString UFlibPatchParserHelper::GetPlatformsStr(TArray<ETargetPlatform> Platforms)
+{
+	FString result;
+	for(auto Platform:Platforms)
+	{
+		FString PlatformStr = THotPatcherTemplateHelper::GetEnumNameByValue(Platform,false);
+		result+=FString::Printf(TEXT("%s,"),*PlatformStr);
+	}
+	result.RemoveFromEnd(TEXT(","));
+	return result;
+}
+
+
+bool UFlibPatchParserHelper::GetCmdletBoolValue(const FString& Token, bool& OutValue)
+{
+	FString bTokenValue;
+	bool bHasToken = FParse::Value(FCommandLine::Get(), *Token.ToLower(), bTokenValue);
+	if(bHasToken)
+	{
+		if(bTokenValue.Equals(TEXT("true"),ESearchCase::IgnoreCase))
+		{
+			OutValue = true;
+		}
+		if(bTokenValue.Equals(TEXT("false"),ESearchCase::IgnoreCase))
+		{
+			OutValue = false;
+		}
+	}
+	return bHasToken;
+}
+
+FString UFlibPatchParserHelper::ReplacePakRegular(const FReplacePakRegular& RegularConf, const FString& InRegular)
+{
+	struct FResularOperator
+	{
+		FResularOperator(const FString& InName,TFunction<FString(void)> InOperator)
+			:Name(InName),Do(InOperator){}
+		FString Name;
+		TFunction<FString(void)> Do;
+	};
+	
+	TArray<FResularOperator> RegularOpList;
+	RegularOpList.Emplace(TEXT("{VERSION}"),[&RegularConf]()->FString{return RegularConf.VersionId;});
+	RegularOpList.Emplace(TEXT("{BASEVERSION}"),[&RegularConf]()->FString{return RegularConf.BaseVersionId;});
+	RegularOpList.Emplace(TEXT("{PLATFORM}"),[&RegularConf]()->FString{return RegularConf.PlatformName;});
+	RegularOpList.Emplace(TEXT("{CHUNKNAME}"),[&RegularConf,InRegular]()->FString
+	{
+		if(InRegular.Contains(TEXT("{VERSION}")) &&
+			InRegular.Contains(TEXT("{CHUNKNAME}")) &&
+			RegularConf.VersionId.Equals(RegularConf.ChunkName))
+		{
+			return TEXT("");
+		}
+		else
+		{
+			return RegularConf.ChunkName;
+		}
+	});
+	
+	auto CustomPakNameRegular = [](const TArray<FResularOperator>& Operators,const FString& Regular)->FString
+	{
+		FString Result = Regular;
+		for(auto& Operator:Operators)
+		{
+			Result = Result.Replace(*Operator.Name,*(Operator.Do()));
+		}
+		auto ReplaceDoubleLambda = [](FString& Src,const FString& From,const FString& To)
+		{
+			while(Src.Contains(From))
+			{
+				Src = Src.Replace(*From,*To);
+			}
+		};
+		ReplaceDoubleLambda(Result,TEXT("__"),TEXT("_"));
+		ReplaceDoubleLambda(Result,TEXT("--"),TEXT("-"));
+		return Result;
+	};
+	
+	return CustomPakNameRegular(RegularOpList,InRegular);
+}

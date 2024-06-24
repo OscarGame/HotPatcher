@@ -1,5 +1,6 @@
 #include "HotSingleCookerCommandlet.h"
 #include "CommandletBase/CommandletHelper.h"
+#include "HotPatcherCore.h"
 // engine header
 #include "CoreMinimal.h"
 #include "Cooker/MultiCooker/FSingleCookerSettings.h"
@@ -14,64 +15,74 @@ DEFINE_LOG_CATEGORY(LogHotSingleCookerCommandlet);
 int32 UHotSingleCookerCommandlet::Main(const FString& Params)
 {
 	Super::Main(Params);
-	
-	FCommandLine::Append(TEXT(" -buildmachine"));
-	GIsBuildMachine = true;
+	SCOPED_NAMED_EVENT_TEXT("UHotSingleCookerCommandlet::Main",FColor::Red);
 	
 	UE_LOG(LogHotSingleCookerCommandlet, Display, TEXT("UHotSingleCookerCommandlet::Main"));
 
-	FString config_path;
-	bool bStatus = FParse::Value(*Params, *FString(PATCHER_CONFIG_PARAM_NAME).ToLower(), config_path);
-	if (!bStatus)
+	if(CmdConfigPath.IsEmpty())
 	{
-		UE_LOG(LogHotSingleCookerCommandlet, Warning, TEXT("not -config=xxxx.json params."));
 		return -1;
 	}
 
-	if (bStatus && !FPaths::FileExists(config_path))
-	{
-		UE_LOG(LogHotSingleCookerCommandlet, Error, TEXT("cofnig file %s not exists."), *config_path);
-		return -1;
-	}
-	// if(IsRunningCommandlet())
-	// {
-	// 	// load asset registry
-	// 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
-	// 	AssetRegistryModule.Get().SearchAllAssets(true);
-	// }
-
-	TSharedPtr<FSingleCookerSettings> ExportSingleCookerSetting = MakeShareable(new FSingleCookerSettings);
+	ExportSingleCookerSetting = MakeShareable(new FSingleCookerSettings);
 	
 	FString JsonContent;
-	if (FPaths::FileExists(config_path) && FFileHelper::LoadFileToString(JsonContent, *config_path))
+	if (FPaths::FileExists(CmdConfigPath) && FFileHelper::LoadFileToString(JsonContent, *CmdConfigPath))
 	{
 		THotPatcherTemplateHelper::TDeserializeJsonStringAsStruct(JsonContent,*ExportSingleCookerSetting);
 	}
-
-	TMap<FString, FString> KeyValues = THotPatcherTemplateHelper::GetCommandLineParamsMap(Params);
-	THotPatcherTemplateHelper::ReplaceProperty(*ExportSingleCookerSetting, KeyValues);
 	
-	if(ExportSingleCookerSetting->bDisplayConfig)
+	bool bExportStatus = false;
 	{
-		FString FinalConfig;
-		THotPatcherTemplateHelper::TSerializeStructAsJsonString(*ExportSingleCookerSetting,FinalConfig);
+		FScopedNamedEventStatic ScopedNamedEvent_ForCooker(FColor::Blue,*ExportSingleCookerSetting->MissionName);
+		TMap<FString, FString> KeyValues = THotPatcherTemplateHelper::GetCommandLineParamsMap(Params);
+		THotPatcherTemplateHelper::ReplaceProperty(*ExportSingleCookerSetting, KeyValues);
+		
+		CommandletHelper::ModifyTargetPlatforms(Params,TARGET_PLATFORMS_OVERRIDE,ExportSingleCookerSetting->CookTargetPlatforms,true);
+		if(ExportSingleCookerSetting->bDisplayConfig)
+		{
+			FString FinalConfig;
+			THotPatcherTemplateHelper::TSerializeStructAsJsonString(*ExportSingleCookerSetting,FinalConfig);
+		}
+		
+		// if(IsRunningCommandlet() && ExportSingleCookerSetting->bPackageTracker && ExportSingleCookerSetting->bCookPackageTrackerAssets)
+		// {
+		// 	SCOPED_NAMED_EVENT_TEXT("SearchAllAssets",FColor::Red);
+		// 	// load asset registry
+		// 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+		// 	AssetRegistryModule.Get().SearchAllAssets(true);
+		// }
+		
+		UE_LOG(LogHotSingleCookerCommandlet, Display, TEXT("Cooker %s Id %d,Assets Num %d"), *ExportSingleCookerSetting->MissionName,ExportSingleCookerSetting->MissionID,ExportSingleCookerSetting->CookAssets.Num());
+		// for pre additional worker
+		if(ExportSingleCookerSetting->bAllowRegisteAdditionalWorker)
+		{
+			FHotPatcherCoreModule::Get().GetSingleCookerAdditionalPreWorkerRegister().Broadcast(ExportSingleCookerSetting);
+			GEngine->ForceGarbageCollection(false);
+			CollectGarbage(RF_NoFlags, false);
+		}
+		GAlwaysReportCrash = false;
+		USingleCookerProxy* SingleCookerProxy = NewObject<USingleCookerProxy>();
+		SingleCookerProxy->AddToRoot();
+		SingleCookerProxy->Init(ExportSingleCookerSetting.Get());
+		bExportStatus = SingleCookerProxy->DoExport();
+		
+		CommandletHelper::MainTick([SingleCookerProxy]()->bool
+		{
+			return SingleCookerProxy->IsFinsihed();
+		});
+		
+		SingleCookerProxy->Shutdown();
+		UE_LOG(LogHotSingleCookerCommandlet,Display,TEXT("Single Cook Mission %s %d is %s!"),*ExportSingleCookerSetting->MissionName,ExportSingleCookerSetting->MissionID,bExportStatus?TEXT("Successed"):TEXT("Failure"));
+
+		// for post additional worker
+		if(ExportSingleCookerSetting->bAllowRegisteAdditionalWorker)
+		{
+			FHotPatcherCoreModule::Get().GetSingleCookerAdditionalPostWorkerRegister().Broadcast(ExportSingleCookerSetting);
+			GEngine->ForceGarbageCollection(false);
+			CollectGarbage(RF_NoFlags, false);
+		}
 	}
-	
-	UE_LOG(LogHotSingleCookerCommandlet, Display, TEXT("Cooker %s Id %d,Assets Num %d"), *ExportSingleCookerSetting->MissionName,ExportSingleCookerSetting->MissionID,ExportSingleCookerSetting->CookAssets.Num());
-
-	GAlwaysReportCrash = false;
-	USingleCookerProxy* SingleCookerProxy = NewObject<USingleCookerProxy>();
-	SingleCookerProxy->AddToRoot();
-	SingleCookerProxy->Init(ExportSingleCookerSetting.Get());
-	bool bExportStatus = SingleCookerProxy->DoExport();
-	
-	CommandletHelper::MainTick([SingleCookerProxy]()->bool
-	{
-		return SingleCookerProxy->IsFinsihed();
-	});
-	
-	SingleCookerProxy->Shutdown();
-	UE_LOG(LogHotSingleCookerCommandlet,Display,TEXT("Single Cook Misstion %s %d is %s!"),*ExportSingleCookerSetting->MissionName,ExportSingleCookerSetting->MissionID,bExportStatus?TEXT("Successed"):TEXT("Failure"));
 	
 	if(FParse::Param(FCommandLine::Get(), TEXT("wait")))
 	{

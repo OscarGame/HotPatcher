@@ -27,7 +27,11 @@
 #include "HAL/FileManager.h"
 #include "PakFileUtilities.h"
 #include "Kismet/KismetTextLibrary.h"
+#include "Misc/EngineVersionComparison.h"
 
+#if !UE_VERSION_OLDER_THAN(5,1,0)
+	typedef FAppStyle FEditorStyle;
+#endif
 
 #define LOCTEXT_NAMESPACE "SHotPatcherCreatePatch"
 
@@ -148,6 +152,8 @@ void SHotPatcherPatchWidget::ImportConfig()
 	if (UFlibAssetManageHelper::LoadFileToString(LoadFile, JsonContent))
 	{
 		THotPatcherTemplateHelper::TDeserializeJsonStringAsStruct(JsonContent,*ExportPatchSetting);
+		// adaptor old version config
+		UFlibHotPatcherCoreHelper::AdaptorOldVersionConfig(ExportPatchSetting->GetAssetScanConfigRef(),JsonContent);
 		SettingsView->GetDetailsView()->ForceRefresh();
 	}
 }
@@ -299,20 +305,27 @@ FReply SHotPatcherPatchWidget::DoDiff()const
 		}
 	}
 	ExportPatchSetting->Init();
-	FHotPatcherVersion CurrentVersion = UFlibPatchParserHelper::ExportReleaseVersionInfo(
-		ExportPatchSetting->GetVersionId(),
-		BaseVersion.VersionId,
-		FDateTime::UtcNow().ToString(),
-		UFlibAssetManageHelper::DirectoryPathsToStrings(ExportPatchSetting->GetAssetIncludeFilters()),
-			UFlibAssetManageHelper::DirectoryPathsToStrings(ExportPatchSetting->GetAssetIgnoreFilters()),
-		ExportPatchSetting->GetAllSkipContents(),
-		ExportPatchSetting->GetForceSkipClasses(),
-		ExportPatchSetting->GetAssetRegistryDependencyTypes(),
-		ExportPatchSetting->GetIncludeSpecifyAssets(),
-		ExportPatchSetting->GetAddExternAssetsToPlatform(),
-		ExportPatchSetting->IsIncludeHasRefAssetsOnly()
-	);
+	FHotPatcherVersion CurrentVersion;
 
+	// UFlibPatchParserHelper::ExportReleaseVersionInfo(
+	// 	ExportPatchSetting->GetVersionId(),
+	// 	BaseVersion.VersionId,
+	// 	FDateTime::UtcNow().ToString(),
+	// 	UFlibAssetManageHelper::DirectoryPathsToStrings(ExportPatchSetting->GetAssetIncludeFilters()),
+	// 		UFlibAssetManageHelper::DirectoryPathsToStrings(ExportPatchSetting->GetAssetIgnoreFilters()),
+	// 	ExportPatchSetting->GetAllSkipContents(),
+	// 	ExportPatchSetting->GetForceSkipClasses(),
+	// 	ExportPatchSetting->GetAssetRegistryDependencyTypes(),
+	// 	ExportPatchSetting->GetIncludeSpecifyAssets(),
+	// 	ExportPatchSetting->GetAddExternAssetsToPlatform(),
+	// 	ExportPatchSetting->IsIncludeHasRefAssetsOnly()
+	// );
+	CurrentVersion.VersionId = ExportPatchSetting->GetVersionId();
+	CurrentVersion.BaseVersionId = BaseVersion.VersionId;
+	CurrentVersion.Date = FDateTime::UtcNow().ToString();
+	UFlibPatchParserHelper::RunAssetScanner(ExportPatchSetting->GetAssetScanConfig(),CurrentVersion);
+	UFlibPatchParserHelper::ExportExternAssetsToPlatform(ExportPatchSetting->GetAddExternAssetsToPlatform(),CurrentVersion,true,ExportPatchSetting->GetHashCalculator());
+	
 	FPatchVersionDiff VersionDiffInfo = UFlibHotPatcherCoreHelper::DiffPatchVersionWithPatchSetting(*ExportPatchSetting, BaseVersion, CurrentVersion);
 	
 	bool bShowDeleteAsset = false;
@@ -378,7 +391,9 @@ FReply SHotPatcherPatchWidget::DoPreviewChunk() const
 		BaseVersion.VersionId,
 		FDateTime::UtcNow().ToString(),
 		NewVersionChunk,
-		ExportPatchSetting->IsIncludeHasRefAssetsOnly()
+		ExportPatchSetting->IsIncludeHasRefAssetsOnly(),
+		ExportPatchSetting->AssetScanConfig.bAnalysisFilterDependencies,
+		ExportPatchSetting->GetHashCalculator()
 	);
 
 	FString CurrentVersionSavePath = ExportPatchSetting->GetCurrentVersionSavePath();
@@ -405,7 +420,7 @@ FReply SHotPatcherPatchWidget::DoPreviewChunk() const
 	FString ShowMsg;
 	for (const auto& Chunk : PatchChunks)
 	{	
-		FChunkAssetDescribe ChunkAssetsDescrible = UFlibPatchParserHelper::CollectFChunkAssetsDescribeByChunk(VersionDiffInfo, Chunk,ExportPatchSetting->GetPakTargetPlatforms());
+		FChunkAssetDescribe ChunkAssetsDescrible = UFlibPatchParserHelper::CollectFChunkAssetsDescribeByChunk(ExportPatchSetting.Get(), VersionDiffInfo,Chunk, ExportPatchSetting->GetPakTargetPlatforms());
 		ShowMsg.Append(FString::Printf(TEXT("Chunk:%s\n"), *Chunk.ChunkName));
 		auto AppendFilesToMsg = [&ShowMsg](const FString& CategoryName, const TArray<FName>& InFiles)
 		{
@@ -456,61 +471,15 @@ EVisibility SHotPatcherPatchWidget::VisibilityPreviewChunkButtons() const
 }
 bool SHotPatcherPatchWidget::CanExportPatch()const
 {
-	bool bCanExport = false;
-	if (ExportPatchSetting)
-	{
-		bool bHasBase = false;
-		if (ExportPatchSetting->IsByBaseVersion())
-			bHasBase = !ExportPatchSetting->GetBaseVersion().IsEmpty() && FPaths::FileExists(ExportPatchSetting->GetBaseVersion());
-		else
-			bHasBase = true;
-		bool bHasVersionId = !ExportPatchSetting->GetVersionId().IsEmpty();
-		bool bHasFilter = !!ExportPatchSetting->GetAssetIncludeFilters().Num();
-		bool bHasSpecifyAssets = !!ExportPatchSetting->GetIncludeSpecifyAssets().Num();
-		// bool bHasExternFiles = !!ExportPatchSetting->GetAddExternFiles().Num();
-		// bool bHasExDirs = !!ExportPatchSetting->GetAddExternDirectory().Num();
-		bool bHasExternFiles = true;
-		if(GetDefault<UHotPatcherSettings>()->bExternalFilesCheck)
-		{
-			bHasExternFiles = !!ExportPatchSetting->GetAllPlatfotmExternFiles().Num();
-		}
-		
-		bool bHasExDirs = !!ExportPatchSetting->GetAddExternAssetsToPlatform().Num();
-		bool bHasSavePath = !ExportPatchSetting->GetSaveAbsPath().IsEmpty();
-		bool bHasPakPlatfotm = !!ExportPatchSetting->GetPakTargetPlatforms().Num();
-		
-		bool bHasAnyPakFiles = (
-			bHasFilter || bHasSpecifyAssets || bHasExternFiles || bHasExDirs ||
-			ExportPatchSetting->IsIncludeEngineIni() ||
-			ExportPatchSetting->IsIncludePluginIni() ||
-			ExportPatchSetting->IsIncludeProjectIni()
-			);
-		bCanExport = bHasBase && bHasVersionId && bHasAnyPakFiles && bHasPakPlatfotm && bHasSavePath;
-	}
-	return bCanExport;
+	return UFlibPatchParserHelper::IsValidPatchSettings(ExportPatchSetting.Get(),GetDefault<UHotPatcherSettings>()->bExternalFilesCheck);
 }
 
 FReply SHotPatcherPatchWidget::DoExportPatch()
 {
-	if(!GetConfigSettings()->IsStandaloneMode())
-	{
-		UPatcherProxy* PatcherProxy = NewObject<UPatcherProxy>();
-		PatcherProxy->AddToRoot();
-		PatcherProxy->Init(ExportPatchSetting.Get());
-		PatcherProxy->OnShowMsg.AddRaw(this,&SHotPatcherPatchWidget::ShowMsg);
-		PatcherProxy->DoExport();
-	}
-	else
-	{
-		FString CurrentConfig;
-		THotPatcherTemplateHelper::TSerializeStructAsJsonString(*GetConfigSettings(),CurrentConfig);
-		FString SaveConfigTo = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(),TEXT("HotPatcher"),TEXT("PatchConfig.json")));
-		FFileHelper::SaveStringToFile(CurrentConfig,*SaveConfigTo);
-		FString ProfilingCmd = GetConfigSettings()->IsEnableProfiling() ? TEXT("-trace=cpu,loadtimetrace") : TEXT("");
-		FString MissionCommand = FString::Printf(TEXT("\"%s\" -run=HotPatcher -config=\"%s\" %s %s"),*UFlibPatchParserHelper::GetProjectFilePath(),*SaveConfigTo,*GetConfigSettings()->GetCombinedAdditionalCommandletArgs(),*ProfilingCmd);
-		UE_LOG(LogHotPatcher,Log,TEXT("HotPatcher %s Mission: %s %s"),*GetMissionName(),*UFlibHotPatcherCoreHelper::GetUECmdBinary(),*MissionCommand);
-		FHotPatcherEditorModule::Get().RunProcMission(UFlibHotPatcherCoreHelper::GetUECmdBinary(),MissionCommand,GetMissionName());
-	}
+	TSharedPtr<FExportPatchSettings> PatchSettings = MakeShareable(new FExportPatchSettings);
+	*PatchSettings = *GetConfigSettings();
+	FHotPatcherEditorModule::Get().CookAndPakByPatchSettings(PatchSettings,PatchSettings->IsStandaloneMode());
+
 	return FReply::Handled();
 }
 

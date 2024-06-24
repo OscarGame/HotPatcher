@@ -3,6 +3,7 @@
 #pragma once
 
 //project header
+#include "BaseTypes/FAssetScanConfig.h"
 #include "FChunkInfo.h"
 #include "FPakFileInfo.h"
 #include "FReplaceText.h"
@@ -16,6 +17,7 @@
 #include "FCookerConfig.h"
 #include "FPlatformExternFiles.h"
 #include "Templates/HotPatcherTemplateHelper.hpp"
+#include "AssetRegistry.h"
 
 // engine header
 #include "CoreMinimal.h"
@@ -23,11 +25,11 @@
 #include "JsonObjectConverter.h"
 #include "Misc/CommandLine.h"
 #include "FPlatformExternAssets.h"
-#include "AssetRegistryState.h"
 #include "Containers/UnrealString.h"
 #include "CreatePatch/FExportPatchSettings.h"
 #include "Templates/SharedPointer.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
+#include "Misc/FileHelper.h"
 #include "FlibPatchParserHelper.generated.h"
 
 struct FExportPatchSettings;
@@ -47,29 +49,17 @@ public:
 	UFUNCTION(BlueprintCallable)
 	static FString GetProjectFilePath();
 	
-	static FHotPatcherVersion ExportReleaseVersionInfo(
-        const FString& InVersionId,
-        const FString& InBaseVersion,
-        const FString& InDate,
-        const TArray<FString>& InIncludeFilter,
-        const TArray<FString>& InIgnoreFilter,
-        const TArray<FString>& ForceSkipContents,
-        const TArray<UClass*>& ForceSkipClasses,
-        const TArray<EAssetRegistryDependencyTypeEx>& AssetRegistryDependencyTypes,
-        const TArray<FPatcherSpecifyAsset>& InIncludeSpecifyAsset,
-        const TArray<FPlatformExternAssets>& AddToPlatformExFiles,
-        bool InIncludeHasRefAssetsOnly = false,
-        bool bInAnalysisFilterDependencies = true
-    );
 	static FHotPatcherVersion ExportReleaseVersionInfoByChunk(
 		const FString& InVersionId,
 		const FString& InBaseVersion,
 		const FString& InDate,
 		const FChunkInfo& InChunkInfo,
 		bool InIncludeHasRefAssetsOnly = false,
-		bool bInAnalysisFilterDependencies = true
+		bool bInAnalysisFilterDependencies = true, EHashCalculator HashCalculator = EHashCalculator::NoHash
 	);
-
+	static void RunAssetScanner(FAssetScanConfig ScanConfig,FHotPatcherVersion& ExportVersion);
+	static void ExportExternAssetsToPlatform(const TArray<FPlatformExternAssets>& AddExternAssetsToPlatform, FHotPatcherVersion& ExportVersion, bool bGenerateHASH, EHashCalculator
+	                                         HashCalculator);
 
 	UFUNCTION(BlueprintCallable, Category = "HotPatcher|Flib")
 		static bool DiffVersionAssets(const FAssetDependenciesInfo& InNewVersion, 
@@ -79,14 +69,15 @@ public:
 								FAssetDependenciesInfo& OutDeleteAsset
 		);
 
-	UFUNCTION()
+	// UFUNCTION()
 	static bool DiffVersionAllPlatformExFiles(
+		const FExportPatchSettings& PatchSetting,
         const FHotPatcherVersion& InBaseVersion,
         const FHotPatcherVersion& InNewVersion,
 		TMap<ETargetPlatform,FPatchVersionExternDiff>& OutDiff        
     );
 	UFUNCTION()
-	static FPlatformExternFiles GetAllExFilesByPlatform(const FPlatformExternAssets& InPlatformConf,bool InGeneratedHash=true);
+	static FPlatformExternFiles GetAllExFilesByPlatform(const FPlatformExternAssets& InPlatformConf, bool InGeneratedHash=true, EHashCalculator HashCalculator = EHashCalculator::NoHash);
 	UFUNCTION(BlueprintCallable, Category = "HotPatcher|Flib")
 		static bool GetPakFileInfo(const FString& InFile,FPakFileInfo& OutFileInfo);
 
@@ -118,7 +109,7 @@ public:
 			const FString& InCookedFile,
 			FString& OutCommand,
 			TFunction<void(const FPakCommand&)> InReceiveCommand = [](const FPakCommand&) {});
-	static bool ConvNotAssetFileToExFile(const FString& InProjectDir, const FString& InPlatformName, const FString& InCookedFile, FExternFileInfo& OutExFile);
+	// static bool ConvNotAssetFileToExFile(const FString& InProjectDir, const FString& InPlatformName, const FString& InCookedFile, FExternFileInfo& OutExFile);
 	UFUNCTION(BlueprintCallable, Category = "HotPatcher|Flib")
 	static FString HashStringWithSHA1(const FString &InString);
 
@@ -135,7 +126,7 @@ public:
 	static TArray<FString> GetEnabledPluginConfigs(const FString& InPlatformName);
 
 
-	static TArray<FExternFileInfo> ParserExDirectoryAsExFiles(const TArray<FExternDirectoryInfo>& InExternDirectorys);
+	static TArray<FExternFileInfo> ParserExDirectoryAsExFiles(const TArray<FExternDirectoryInfo>& InExternDirectorys,EHashCalculator HashCalculator,bool InGeneratedHash = true);
 	static TArray<FAssetDetail> ParserExFilesInfoAsAssetDetailInfo(const TArray<FExternFileInfo>& InExFiles);
 
 	// get Engine / Project / Plugin ini files
@@ -145,7 +136,7 @@ public:
 		const FPakInternalInfo& InPakInternalInfo, 
 		const FString& PlatformName);
 
-	static TArray<FExternFileInfo> GetInternalFilesAsExFiles(const FPakInternalInfo& InPakInternalInfo, const FString& InPlatformName);
+	// static TArray<FExternFileInfo> GetInternalFilesAsExFiles(const FPakInternalInfo& InPakInternalInfo, const FString& InPlatformName);
 	static TArray<FString> GetPakCommandsFromInternalInfo(
 		const FPakInternalInfo& InPakInternalInfo, 
 		const FString& PlatformName, 
@@ -161,8 +152,8 @@ public:
 	TMap<ETargetPlatform,FPlatformExternFiles> GetAllPlatformExternFilesFromChunk(const FChunkInfo& InChunk, bool bCalcHash);
 
 	static FChunkAssetDescribe CollectFChunkAssetsDescribeByChunk(
-		const FPatchVersionDiff& DiffInfo,
-		const FChunkInfo& Chunk, TArray<ETargetPlatform> Platforms
+		const FHotPatcherSettingBase* PatcheSettings,
+		const FPatchVersionDiff& DiffInfo, const FChunkInfo& Chunk, TArray<ETargetPlatform> Platforms
 	);
 
 	static TArray<FString> CollectPakCommandsStringsByChunk(
@@ -183,13 +174,14 @@ public:
 
 	static TArray<FString> GetPakCommandStrByCommands(const TArray<FPakCommand>& PakCommands, const TArray<FReplaceText>& InReplaceTexts = TArray<FReplaceText>{},bool bIoStore=false);
 	static bool GetCookProcCommandParams(const FCookerConfig& InConfig,FString& OutParams);
-	static void ExcludeContentForVersionDiff(FPatchVersionDiff& VersionDiff,const TArray<FString>& ExcludeRules = {TEXT("")});
+	static void ExcludeContentForVersionDiff(FPatchVersionDiff& VersionDiff,const TArray<FString>& ExcludeRules = {TEXT("")},EHotPatcherMatchModEx matchMod=EHotPatcherMatchModEx::StartWith);
 	static FString MountPathToRelativePath(const FString& InMountPath);
 
 
 	static TMap<FString,FString> GetReplacePathMarkMap();
 	static FString ReplaceMark(const FString& Src);
 	static FString ReplaceMarkPath(const FString& Src);
+	static FString MakeMark(const FString& Src);
 	// [PORJECTDIR] to real path
 	static void ReplacePatherSettingProjectDir(TArray<FPlatformExternAssets>& PlatformAssets);
 
@@ -232,5 +224,30 @@ public:
 	static bool SerializePakEncryptionKeyToFile(const FPakEncryptionKeys& PakEncryptionKeys,const FString& ToFile);
 
 	static TArray<FDirectoryPath> GetDefaultForceSkipContentDir();
+
+	static FSHAHash FileSHA1Hash(const FString& Filename);
+	
+	static FString FileHash(const FString& Filename,EHashCalculator Calculator);
+
+	template<typename T>
+	static bool SerializeStruct(T SerializeStruct,const FString& SaveTo)
+	{
+		SCOPED_NAMED_EVENT_TEXT("SerializeStruct",FColor::Red);
+		FString SaveToPath = UFlibPatchParserHelper::ReplaceMark(SaveTo);
+		FString SerializedJsonContent;
+		THotPatcherTemplateHelper::TSerializeStructAsJsonString(SerializeStruct,SerializedJsonContent);
+		return FFileHelper::SaveStringToFile(SerializedJsonContent,*FPaths::ConvertRelativePathToFull(SaveToPath));
+	}
+
+	static bool IsValidPatchSettings(const FExportPatchSettings* PatchSettings,bool bExternalFilesCheck);
+	static void SetPropertyTransient(UStruct* Struct,const FString& PropertyName,bool bTransient);
+	static FString GetTargetPlatformsCmdLine(const TArray<ETargetPlatform>& Platforms);
+	static FString GetTargetPlatformsStr(const TArray<ETargetPlatform>& Platforms);
+	static FString MergeOptionsAsCmdline(const TArray<FString>& InOptions);
+	static FString GetPlatformsStr(TArray<ETargetPlatform> Platforms);
+
+	static bool GetCmdletBoolValue(const FString& Token,bool& OutValue);
+
+	static FString ReplacePakRegular(const FReplacePakRegular& RegularConf, const FString& InRegular);
 };
 

@@ -7,7 +7,7 @@
 #include "FlibPatchParserHelper.h"
 #include "Cooker/MultiCooker/FCookShaderCollectionProxy.h"
 #include "Interfaces/IPluginManager.h"
-#include "ShaderPatch/FlibShaderCodeLibraryHelper.h"
+#include "ShaderLibUtils/FlibShaderCodeLibraryHelper.h"
 
 // FString UFlibHotCookerHelper::GetMultiCookerBaseDir()
 // {
@@ -30,14 +30,21 @@
 // 	return SaveConfigTo;
 // }
 
+FString UFlibHotCookerHelper::GetCookedDir()
+{
+	return FPaths::Combine(
+				TEXT("[PROJECTDIR]"),
+				TEXT("Saved"),TEXT("Cooked"));
+}
+
 FString UFlibHotCookerHelper::GetCookerBaseDir()
 {
-		FString SaveConfigTo = FPaths::ConvertRelativePathToFull(
-			FPaths::Combine(
-				FPaths::ProjectSavedDir(),
-				TEXT("HotPatcher/Cooker"),
+		FString SaveConfigTo = FPaths::Combine(
+				TEXT("[PROJECTDIR]"),
+				TEXT("Saved"),
+				TEXT("HotPatcher/MultiCooker"),
 				FApp::GetProjectName()
-				));
+				);
 		return SaveConfigTo;
 }
 
@@ -45,14 +52,14 @@ FString UFlibHotCookerHelper::GetCookerProcFailedResultPath(const FString& BaseD
 {
 	FString SaveConfigTo = FPaths::Combine(
 			BaseDir,
-			FString::Printf(TEXT("%s.json"),*MissionName)
+			FString::Printf(TEXT("%s_FailedAssets.json"),*MissionName)
 			);
 	return SaveConfigTo;
 }
 
 FString UFlibHotCookerHelper::GetProfilingCmd()
 {
-	return FString::Printf(TEXT("-trace=cpu,memory,loadtime -statnamedevents implies -llm"));
+	return FString::Printf(TEXT("-tracehost=127.0.0.1 -trace=cpu,memory,loadtime -statnamedevents implies -llm"));
 }
 
 TSharedPtr<FCookShaderCollectionProxy> UFlibHotCookerHelper::CreateCookShaderCollectionProxyByPlatform(
@@ -88,4 +95,20 @@ TSharedPtr<FCookShaderCollectionProxy> UFlibHotCookerHelper::CreateCookShaderCol
 			));
 	
 	return CookShaderCollection;
+}
+
+bool UFlibHotCookerHelper::IsAppleMetalPlatform(ITargetPlatform* TargetPlatform)
+{
+	SCOPED_NAMED_EVENT_TEXT("IsAppleMetalPlatform",FColor::Red);
+	bool bIsMatched = false;
+	TArray<FString> ApplePlatforms = {TEXT("IOS"),TEXT("Mac"),TEXT("TVOS")};
+	for(const auto& Platform:ApplePlatforms)
+	{
+		if(TargetPlatform->PlatformName().StartsWith(Platform,ESearchCase::IgnoreCase))
+		{
+			bIsMatched = true;
+			break;
+		}
+	}
+	return bIsMatched;
 }

@@ -14,7 +14,8 @@ public class HotPatcherRuntime : ModuleRules
 			new string[] {
 				Path.Combine(EngineDirectory,"Source/Runtime/Launch"),
 				Path.Combine(ModuleDirectory,"Public"),
-				Path.Combine(ModuleDirectory,"Public/BaseTypes")
+				Path.Combine(ModuleDirectory,"Public/BaseTypes"),
+				Path.Combine(ModuleDirectory,"Public/Templates")
 				// ... add public include paths required here ...
 			}
 			);
@@ -28,7 +29,10 @@ public class HotPatcherRuntime : ModuleRules
 
 		if (Target.bBuildEditor)
 		{
-			PublicDependencyModuleNames.Add("TargetPlatform");
+			PublicDependencyModuleNames.AddRange(new string[]
+			{
+				"TargetPlatform"
+			});
 		}
 		
 		PublicDependencyModuleNames.AddRange(
@@ -53,10 +57,13 @@ public class HotPatcherRuntime : ModuleRules
 				"CoreUObject",
 				"Engine",
 				"Slate",
-				"SlateCore"
+				"SlateCore",
+				"HTTP",
+				"Sockets"
 				// ... add private dependencies that you statically link with here ...	
 			}
 		);
+		
 		if (Target.Version.MajorVersion > 4 || Target.Version.MinorVersion > 21)
 		{
 			PrivateDependencyModuleNames.Add("RenderCore");
@@ -76,16 +83,23 @@ public class HotPatcherRuntime : ModuleRules
 		};
 
 		AddPublicDefinitions("WITH_EDITOR_SECTION", Version.MajorVersion > 4 || Version.MinorVersion > 24);
-
+		bool bForceSingleThread = (Version.MajorVersion == 4 && Version.MinorVersion < 25) ||
+		                          (Version.MajorVersion == 5 && Version.MinorVersion >= 1);
+		AddPublicDefinitions("FORCE_SINGLE_THREAD",bForceSingleThread);
+		
 		bool bEnableAssetDependenciesDebugLog = true;
 		AddPublicDefinitions("ASSET_DEPENDENCIES_DEBUG_LOG", bEnableAssetDependenciesDebugLog);
 		
 		bool bCustomAssetGUID = false;
+
+		if (Version.MajorVersion > 4) { bCustomAssetGUID = true; }
 		if(bCustomAssetGUID)
 		{
 			PublicDefinitions.Add("CUSTOM_ASSET_GUID");	
 		}
+		AddPublicDefinitions("WITH_UE5", Version.MajorVersion > 4);
 		
+		AddPublicDefinitions("AUTOLOAD_SHADERLIB_AT_RUNTIME", true);
 		bLegacyPublicIncludePaths = false;
 		OptimizeCode = CodeOptimization.InShippingBuildsOnly;
 	}

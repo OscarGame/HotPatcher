@@ -1,6 +1,7 @@
 #pragma  once
 #include "FThreadUtils.hpp"
 #include "CoreMinimal.h"
+#include "Misc/Paths.h"
 #include "GenericPlatform/GenericPlatformProcess.h"
 
 class FProcWorkerThread;
@@ -56,36 +57,42 @@ public:
 				}
 				FPlatformProcess::Sleep(0.2f);
 			}
-
+			
+			bool bRunSuccessfuly = false;
 			int32 ProcReturnCode;
 			if (FPlatformProcess::GetProcReturnCode(mProcessHandle,&ProcReturnCode))
 			{
 				if (ProcReturnCode == 0)
 				{
-					if(ProcSuccessedDelegate.IsBound())
-						ProcSuccessedDelegate.Broadcast(this);
+					bRunSuccessfuly = true;
 				}
-				else
+			}
+			ProcOutputMsgDelegate.ExecuteIfBound(this,FString::Printf(TEXT("ProcWorker %s return value %d."),*mThreadName,ProcReturnCode));
+
+			mThreadStatus = EThreadStatus::Completed;
+			if (bRunSuccessfuly)
+			{
+				if(ProcSuccessedDelegate.IsBound())
 				{
-					if (ProcFaildDelegate.IsBound())
-						ProcFaildDelegate.Broadcast(this);
+					ProcSuccessedDelegate.Broadcast(this);
 				}
 			}
 			else
 			{
 				if (ProcFaildDelegate.IsBound())
+				{
 					ProcFaildDelegate.Broadcast(this);
-
+				}
 			}
-			
 		}
-		mThreadStatus = EThreadStatus::Completed;
 		return 0;
 	}
+	
 	virtual void Exit()override
 	{
-		Cancel();
+		FThreadWorker::Exit();
 	}
+	
 	virtual void Cancel()override
 	{
 		if (GetThreadStatus() != EThreadStatus::Busy)
@@ -101,13 +108,17 @@ public:
 			FPlatformProcess::TerminateProc(mProcessHandle, true);
 
 			if (ProcFaildDelegate.IsBound())
+			{
 				ProcFaildDelegate.Broadcast(this);
+			}
 			mProcessHandle.Reset();
 			mProcessID = 0;
 		}
 		mThreadStatus = EThreadStatus::Canceled;
 		if (CancelDelegate.IsBound())
+		{
 			CancelDelegate.Broadcast();
+		}
 	}
 
 	virtual uint32 GetProcesId()const { return mProcessID; }

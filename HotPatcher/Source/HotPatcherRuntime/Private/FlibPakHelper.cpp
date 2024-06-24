@@ -3,15 +3,21 @@
 
 #include "FlibPakHelper.h"
 #include "IPlatformFilePak.h"
+#if UE_VERSION_OLDER_THAN(5,0,0)
 #include "HAL/PlatformFilemanager.h"
+#else
+#include "HAL/PlatformFileManager.h"
+#endif
 #include "AssetManager/FFileArrayDirectoryVisitor.hpp"
 #include "HotPatcherLog.h"
+#include "FlibAssetManageHelper.h"
+#include "HotPatcherTemplateHelper.hpp"
+#include "AssetRegistry.h"
 
 // Engine Header
 #include "Resources/Version.h"
 #include "Serialization/ArrayReader.h"
-#include "AssetRegistryModule.h"
-#include "IAssetRegistry.h"
+
 #include "Misc/ScopeExit.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonReader.h"
@@ -19,12 +25,13 @@
 #include "IPlatformFilePak.h"
 #include "ShaderPipelineCache.h"
 #include "RHI.h"
-#include "AssetRegistryState.h"
-#include "HotPatcherTemplateHelper.hpp"
 #include "Misc/Base64.h"
 #include "Misc/CoreDelegates.h"
 #include "Serialization/LargeMemoryReader.h"
 #include "ShaderCodeLibrary.h"
+#include "Misc/EngineVersionComparison.h"
+
+TSet<FName> UFlibPakHelper::LoadShaderLibraryNames;
 
 void UFlibPakHelper::ExecMountPak(FString InPakPath, int32 InPakOrder, FString InMountPoint)
 {
@@ -227,15 +234,22 @@ void UFlibPakHelper::ReloadShaderbytecode()
 }
 
 
-bool UFlibPakHelper::LoadShaderbytecode(const FString& LibraryName, const FString& LibraryDir)
+bool UFlibPakHelper::LoadShaderbytecode(const FString& LibraryName, const FString& LibraryDir,bool bNative)
 {
 	bool result = true;
 	FString FinalLibraryDir = LibraryDir;
 #if PLATFORM_IOS
-	FinalLibraryDir = IFileManager::Get().ConvertToAbsolutePathForExternalAppForRead(*LibraryDir);;
+	if(bNative)
+	{
+		FinalLibraryDir = IFileManager::Get().ConvertToAbsolutePathForExternalAppForRead(*LibraryDir);
+	}
 #endif
-#if ENGINE_MAJOR_VERSION > 4 || ENGINE_MINOR_VERSION >= 23
-	result = FShaderCodeLibrary::OpenLibrary(LibraryName, LibraryDir);
+#if UE_VERSION_NEWER_THAN(4,23,0)
+	result = FShaderCodeLibrary::OpenLibrary(LibraryName, LibraryDir
+	#if !UE_VERSION_OLDER_THAN(5,3,0)
+	,true
+	#endif
+	);
 #else
 	FShaderCodeLibrary::OpenLibrary(LibraryName, LibraryDir);
 #endif
@@ -251,6 +265,85 @@ bool UFlibPakHelper::LoadShaderbytecodeInDefaultDir(const FString& LibraryName)
 void UFlibPakHelper::CloseShaderbytecode(const FString& LibraryName)
 {
 	FShaderCodeLibrary::CloseLibrary(LibraryName);
+}
+
+#if !UE_VERSION_OLDER_THAN(5,2,0)
+#include "DataDrivenShaderPlatformInfo.h"
+#endif
+void UFlibPakHelper::LoadShaderLibrary(const FString& ScanShaderLibs)
+{
+	UE_LOG(LogHotPatcher, Display, TEXT("Searching ShaderLibrary in %s."),*ScanShaderLibs);
+	TArray<FString> ShaderLibFiles;
+	bool bExist = UFlibPakHelper::ScanPlatformDirectory(ScanShaderLibs,true,false,true,ShaderLibFiles);
+	
+	if(bExist)
+	{
+		EShaderPlatform ShaderPlatform = FShaderCodeLibrary::GetRuntimeShaderPlatform();
+		bool bIOSPlatform = ::RHISupportsNativeShaderLibraries(ShaderPlatform);
+		const FString PlatformName = LegacyShaderPlatformToShaderFormat(ShaderPlatform).ToString();
+		// ShaderArchive-Base_EffectTemp-GLSL_ES3_1_ANDROID.ushaderbytecode
+		auto ParseShaderLibName = [](const FString& FileName,const FString& PlatformName)->FString
+		{
+			FString result = FileName;
+			if(result.EndsWith(TEXT(".ushaderbytecode")))
+			{
+				result.RemoveFromStart(TEXT("ShaderArchive-"),ESearchCase::IgnoreCase); // Base_EffectTemp-GLSL_ES3_1_ANDROID.ushaderbytecode
+				result.RemoveFromEnd(TEXT(".ushaderbytecode"),ESearchCase::IgnoreCase); // Base_EffectTemp-GLSL_ES3_1_ANDROID
+				while(result.EndsWith(PlatformName))// Base_EffectTemp
+				{
+					result.RemoveFromEnd(FString::Printf(TEXT("-%s"),*PlatformName),ESearchCase::IgnoreCase);
+				}
+			}
+			if(result.EndsWith(TEXT("_sf_metal.metalmap")))
+			{
+				result.RemoveFromEnd(TEXT("_sf_metal.metalmap"),ESearchCase::IgnoreCase);
+			}
+			return result;
+		};
+		auto IsIOSNativeLib = [](const FString& Filename)->bool
+		{
+			return Filename.EndsWith(TEXT(".metalmap"),ESearchCase::IgnoreCase) ||
+				Filename.EndsWith(TEXT(".metallib"),ESearchCase::IgnoreCase);
+		};
+		auto IsValidShaderLibFile = [](const FString& FileName)->bool
+		{
+			return (FileName.EndsWith(TEXT(".ushaderbytecode")) || FileName.EndsWith(TEXT("_sf_metal.metalmap")));
+		};
+
+		int32 NewShdaerLibCount = 0;
+		for(const auto& File:ShaderLibFiles)
+		{
+			FString Filename = FPaths::GetBaseFilename(File,true) + FPaths::GetExtension(File,true);
+			if(!IsValidShaderLibFile(Filename))
+			{
+				continue;
+			}
+			FString ShaderLibName = ParseShaderLibName(Filename,PlatformName);
+			if(!LoadShaderLibraryNames.Contains(*ShaderLibName))
+			{
+				bool bIsIOSNative = IsIOSNativeLib(Filename);
+				UE_LOG(LogHotPatcher,Log,TEXT("Load Shaderbytecode,file %s,name %s,Platform %s,IsIOSNative %s."),*Filename,*ShaderLibName,*PlatformName,bIsIOSNative?TEXT("true"):TEXT("false"));
+				if(UFlibPakHelper::LoadShaderbytecode(ShaderLibName,ScanShaderLibs,bIsIOSNative))
+				{
+					LoadShaderLibraryNames.Add(*ShaderLibName);
+				}
+				++NewShdaerLibCount;
+			}
+		}
+		UE_LOG(LogHotPatcher, Display, TEXT("Found ShaderLibrary %d in %s."),NewShdaerLibCount,*ScanShaderLibs);
+	}
+}
+
+void UFlibPakHelper::LoadHotPatcherAllShaderLibrarys()
+{
+	LoadShaderLibrary(FPaths::Combine(FPaths::ProjectContentDir(),TEXT("Paks"))); // Content/Psk
+	FString ShaderLibsDir = TEXT("ShaderLibs");
+#if PLATFORM_IOS //  // shdaerlibs
+	ShaderLibsDir = ShaderLibsDir.ToLower();
+#endif
+	LoadShaderLibrary(FPaths::Combine(FPaths::ProjectDir(),ShaderLibsDir)); // ShaderLibs
+	LoadShaderLibrary(FPaths::Combine(FPaths::ProjectContentDir(),ShaderLibsDir)); // shdaerlibs
+	LoadShaderLibrary(FPaths::Combine(FPaths::ProjectSavedDir(),TEXT("Paks"))); // Saved/Paks
 }
 
 #if ENGINE_MAJOR_VERSION > 4 || ENGINE_MINOR_VERSION > 26
@@ -316,10 +409,14 @@ bool UFlibPakHelper::LoadAssetRegistry(const FString& LibraryName, const FString
 }
 
 
-
+#include "Misc/EngineVersionComparison.h"
 bool UFlibPakHelper::OpenPSO(const FString& Name)
 {
+#if UE_VERSION_OLDER_THAN(5,1,0)
 	return FShaderPipelineCache::OpenPipelineFileCache(Name,GMaxRHIShaderPlatform);
+#else
+	return FShaderPipelineCache::OpenPipelineFileCache(GMaxRHIShaderPlatform);
+#endif
 }
 
 FAES::FAESKey CachedAESKey;
@@ -453,14 +550,36 @@ bool PreLoadPak(const FString& InPakPath,const FString& AesKey)
 #define FFileIterator FFilenameIterator
 #endif
 
+FSHA1 UFlibPakHelper::GetPakEntryHASH(FPakFile* InPakFile,const FPakEntry& PakEntry)
+{
+	FSHA1 Sha1;
+	auto Reader = InPakFile->GetSharedReader(nullptr);
+	Reader->Seek(PakEntry.Offset);
+	FPakEntry SerializedEntry;
+#if ENGINE_MAJOR_VERSION > 4	
+	SerializedEntry.Serialize(Reader.GetArchive(), InPakFile->GetInfo().Version);
+#else
+	SerializedEntry.Serialize(*Reader, InPakFile->GetInfo().Version);
+#endif	
+	FMemory::Memcpy(Sha1.m_digest, &SerializedEntry.Hash, sizeof(SerializedEntry.Hash));
+	return Sha1;
+}
+
 TArray<FString> UFlibPakHelper::GetPakFileList(const FString& InPak, const FString& AESKey)
 {
 	TArray<FString> Records;
-	UFlibPakHelper::GetPakEntrys(UFlibPakHelper::GetPakFileIns(InPak,AESKey),AESKey).GetKeys(Records);
+	
+	auto PakFilePtr = UFlibPakHelper::GetPakFileIns(InPak,AESKey);;
+#if ENGINE_MAJOR_VERSION > 4 || ENGINE_MINOR_VERSION > 26
+	TRefCountPtr<FPakFile> PakFile = PakFilePtr;
+#else
+	TSharedPtr<FPakFile> PakFile = MakeShareable(PakFilePtr);
+#endif
+	UFlibPakHelper::GetPakEntrys(PakFilePtr).GetKeys(Records);
 	return Records;
 }
 
-TMap<FString,FPakEntry> UFlibPakHelper::GetPakEntrys(FPakFile* InPakFile, const FString& AESKey)
+TMap<FString,FPakEntry> UFlibPakHelper::GetPakEntrys(FPakFile* InPakFile)
 {
 	TMap<FString,FPakEntry> Records;
 	
@@ -470,47 +589,15 @@ TMap<FString,FPakEntry> UFlibPakHelper::GetPakEntrys(FPakFile* InPakFile, const 
 		for (FPakFile::FFileIterator It(*InPakFile, true); It; ++It)
 		{
 			const FString& Filename = It.Filename();
-			Records.Emplace(MountPoint + Filename,It.Info());
+			FPakEntry PakEntry;
+			PakEntry = It.Info();
+			FSHA1 Sha1 = GetPakEntryHASH(InPakFile,PakEntry);
+			FMemory::Memcpy(PakEntry.Hash,Sha1.m_digest,sizeof(Sha1.m_digest));
+			Records.Emplace(MountPoint + Filename,PakEntry);
 		}
 		
 	}
 	return Records;
-}
-
-void UFlibPakHelper::DumpPakEntrys(const FString& InPak, const FString& AESKey, const FString& SaveTo)
-{
-	auto PakFile = UFlibPakHelper::GetPakFileIns(InPak,AESKey);
-	
-	TMap<FString,FPakEntry> Records = UFlibPakHelper::GetPakEntrys(PakFile,AESKey);
-	FString FileName = FPaths::GetBaseFilename(InPak,true);
-	FPakDumper Results;
-	Results.PakName = FileName;
-	Results.MountPoint = PakFile->GetMountPoint();
-	
-	for(const auto& Pair:Records)
-	{
-		FDumpPakEntry Entry;
-		FString PakFilename = Pair.Key;
-		FString PackageName;
-		FString RecordName;
-		if(FPackageName::TryConvertFilenameToLongPackageName(PakFilename,PackageName))
-		{
-			RecordName = PackageName;
-		}
-		else
-		{
-			RecordName = PakFilename;
-			
-		}
-		PakFilename = FPaths::GetBaseFilename(PakFilename,true) + FPaths::GetExtension(PakFilename,true);
-		Entry.ContentSize = Pair.Value.Size;
-		Entry.Offset = Pair.Value.Offset;
-		Entry.PakEntrySize = Pair.Value.GetSerializedSize(FPakInfo::PakFile_Version_Latest);
-		Results.PakEntrys.FindOrAdd(RecordName).AssetEntrys.Add(PakFilename,Entry);
-	}
-	FString OutString;
-	THotPatcherTemplateHelper::TSerializeStructAsJsonString(Results,OutString);
-	FFileHelper::SaveStringToFile(OutString,*SaveTo);
 }
 
 FPakFile* UFlibPakHelper::GetPakFileIns(const FString& InPak, const FString& AESKey)
@@ -522,14 +609,12 @@ FPakFile* UFlibPakHelper::GetPakFileIns(const FString& InPak, const FString& AES
 	TArray<FString> Records;
 	if(PreLoadPak(StandardFileName,AESKey))
 	{
-#if ENGINE_MAJOR_VERSION > 4 || ENGINE_MINOR_VERSION > 26
-		TRefCountPtr<FPakFile> PakFile = new FPakFile(&PlatformIns->GetPlatformPhysical(), *StandardFileName, false);
-		rPakFile = PakFile.GetReference();
-#else
-		TSharedPtr<FPakFile> PakFile = MakeShareable(new FPakFile(&PlatformIns->GetPlatformPhysical(), *StandardFileName, false));
-		rPakFile = PakFile.Get();
-#endif
-
+// #if ENGINE_MAJOR_VERSION > 4 || ENGINE_MINOR_VERSION > 26
+// 		TRefCountPtr<FPakFile> PakFile = new FPakFile(&PlatformIns->GetPlatformPhysical(), *StandardFileName, false);
+// 		rPakFile = PakFile.GetReference();
+// #else
+		rPakFile = new FPakFile(&PlatformIns->GetPlatformPhysical(), *StandardFileName, false,true);
+//#endif
 	}
 	return rPakFile;
 }
@@ -537,10 +622,17 @@ FPakFile* UFlibPakHelper::GetPakFileIns(const FString& InPak, const FString& AES
 FString UFlibPakHelper::GetPakFileMountPoint(const FString& InPak, const FString& AESKey)
 {
 	FString result;
-	auto PakFile = UFlibPakHelper::GetPakFileIns(InPak,AESKey);
-	if(PakFile)
+
+	auto PakFilePtr = UFlibPakHelper::GetPakFileIns(InPak,AESKey);;
+#if ENGINE_MAJOR_VERSION > 4 || ENGINE_MINOR_VERSION > 26
+	TRefCountPtr<FPakFile> PakFile = PakFilePtr;
+#else
+	TSharedPtr<FPakFile> PakFile = MakeShareable(PakFilePtr);
+#endif
+
+	if(PakFilePtr)
 	{
-		result = PakFile->GetMountPoint();
+		result = PakFilePtr->GetMountPoint();
 	}
 	return result;
 }

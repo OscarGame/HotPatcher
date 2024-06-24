@@ -2,8 +2,9 @@
 #include "HotPatcherLog.h"
 #include "FlibPakHelper.h"
 #include "FlibPatchParserHelper.h"
+#include "Misc/EngineVersionComparison.h"
 
-void FReleasePakParser::Parser(TSharedPtr<FReleaseParserConf> ParserConf)
+void FReleasePakParser::Parser(TSharedPtr<FReleaseParserConf> ParserConf, EHashCalculator HashCalculator)
 {
 	result.Platform = ParserConf->TargetPlatform;
 	FReleasePakFilesConf* Conf = (FReleasePakFilesConf*)ParserConf.Get();
@@ -17,7 +18,11 @@ void FReleasePakParser::Parser(TSharedPtr<FReleaseParserConf> ParserConf)
 	for(const auto& MountFile:InnerPakFiles)
 	{
 		FString Extersion = FPaths::GetExtension(MountFile,true);
-		if(UFlibPatchParserHelper::GetCookedUassetExtensions().Contains(Extersion))
+		bool bIsWPFiles = false;
+#if UE_VERSION_NEWER_THAN(5,0,0)
+		bIsWPFiles = MountFile.Contains(TEXT("/_Generated_/"));
+#endif
+		if(!bIsWPFiles && UFlibPatchParserHelper::GetCookedUassetExtensions().Contains(Extersion))
 		{
 			if (!UFlibPatchParserHelper::GetUnCookUassetExtensions().Contains(Extersion))
 				continue;
@@ -55,9 +60,14 @@ void FReleasePakParser::Parser(TSharedPtr<FReleaseParserConf> ParserConf)
 			RelativePath.RemoveFromStart(ModuleName);
 			FString FinalFilePath = FPaths::Combine(ModuleAbsPath,RelativePath);
 			FPaths::NormalizeFilename(FinalFilePath);
-			currentFile.FilePath.FilePath = FinalFilePath;
-			currentFile.MountPath = MountFile;
-			result.ExternFiles.AddUnique(currentFile);
+			FinalFilePath = FinalFilePath.Replace(TEXT("//"),TEXT("/"));
+			if(FPaths::FileExists(FinalFilePath))
+			{
+				currentFile.SetFilePath(FinalFilePath);
+				currentFile.MountPath = MountFile;
+				currentFile.GenerateFileHash(HashCalculator);
+				result.ExternFiles.AddUnique(currentFile);
+			}
 		}
 	}
 }

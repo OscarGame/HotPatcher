@@ -3,36 +3,19 @@
 #include "HotPatcherRuntime.h"
 #include "FlibPatchParserHelper.h"
 #include "ETargetPlatform.h"
-#include "Interfaces/ITargetPlatform.h"
 #include "Misc/EnumRange.h"
-
-#if WITH_EDITOR
-#include "Interfaces/ITargetPlatformManagerModule.h"
-#endif
+#include "HotPatcherLog.h"
 
 #define LOCTEXT_NAMESPACE "FHotPatcherRuntimeModule"
 
+bool GForceSingleThread = (bool)FORCE_SINGLE_THREAD;
 
 void FHotPatcherRuntimeModule::StartupModule()
 {
-	TArray<FString> AppendPlatformEnums;
-	
-#if WITH_EDITOR
-	TArray<FString> RealPlatformEnums;
-	ITargetPlatformManagerModule& TPM = GetTargetPlatformManagerRef();
-	const TArray<ITargetPlatform*>& TargetPlatforms = TPM.GetTargetPlatforms();
-	for (ITargetPlatform *TargetPlatformIns : TargetPlatforms)
-	{
-		FString PlatformName = TargetPlatformIns->PlatformName();
-		if(!PlatformName.IsEmpty())
-		{
-			RealPlatformEnums.AddUnique(PlatformName);
-		}
-	}
-	AppendPlatformEnums = RealPlatformEnums;
+	UE_LOG(LogHotPatcher,Display,TEXT("HotPatcherRuntime StartupModule"));
+#if AUTOLOAD_SHADERLIB_AT_RUNTIME && !WITH_EDITOR
+	UFlibPakHelper::LoadHotPatcherAllShaderLibrarys();
 #endif
-	
-	TArray<TPair<FName, int64>> EnumNames = THotPatcherTemplateHelper::AppendEnumeraters<ETargetPlatform>(AppendPlatformEnums);
 }
 
 void FHotPatcherRuntimeModule::ShutdownModule()

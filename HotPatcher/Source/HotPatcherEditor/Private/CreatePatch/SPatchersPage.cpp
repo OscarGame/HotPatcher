@@ -3,8 +3,6 @@
 #include "CreatePatch/SPatchersPage.h"
 #include "CreatePatch/SHotPatcherPatchWidget.h"
 #include "CreatePatch/SHotPatcherReleaseWidget.h"
-#include "ShaderPatch/SShaderPatchWidget.h"
-#include "GameFeature/SGameFeaturePackageWidget.h"
 
 // engine header
 #include "HotPatcherEditor.h"
@@ -26,13 +24,16 @@ void SPatchersPage::Construct(const FArguments& InArgs, TSharedPtr<FHotPatcherCo
 	
 	// create cook modes menu
 	FMenuBuilder PatchModeMenuBuilder(true, NULL);
-	TMap<FString,FHotPatcherAction>* Patchers = FHotPatcherActionManager::Get().GetHotPatcherActions().Find(TEXT("Patcher"));
+	TMap<FString,FHotPatcherAction>* Patchers = FHotPatcherActionManager::Get().GetHotPatcherActions().Find(GetPageName());
 	if(Patchers)
 	{
 		for(const auto& Action:*Patchers)
 		{
-			FUIAction UIAction = FExecuteAction::CreateSP(this, &SPatchersPage::HandleHotPatcherMenuEntryClicked, Action.Value.ActionName.Get().ToString(),Action.Value.ActionCallback);
-			PatchModeMenuBuilder.AddMenuEntry(Action.Value.ActionName, Action.Value.ActionToolTip, Action.Value.Icon, UIAction);
+			if(FHotPatcherActionManager::Get().IsSupportEditorAction(Action.Key))
+			{
+				FUIAction UIAction = FExecuteAction::CreateSP(this, &SPatchersPage::HandleHotPatcherMenuEntryClicked, Action.Value.ActionName.Get().ToString(),Action.Value.ActionCallback);
+				PatchModeMenuBuilder.AddMenuEntry(Action.Value.ActionName, Action.Value.ActionToolTip, Action.Value.Icon, UIAction);
+			}
 		}
 	}
 
@@ -108,11 +109,15 @@ void SPatchersPage::Construct(const FArguments& InArgs, TSharedPtr<FHotPatcherCo
 	{
 		for(const auto& Patcher:*Patchers)
 		{
-			TSharedRef<SCompoundWidget> CookAction = Patcher.Value.RequestWidget(GetContext());
-			Widget->AddSlot().AutoHeight().Padding(0.0, 8.0, 0.0, 0.0)
-			[
-				CookAction
-			];
+			if(Patcher.Value.RequestWidget)
+			{
+				TSharedRef<SHotPatcherWidgetInterface> Action = Patcher.Value.RequestWidget(GetContext());
+				Widget->AddSlot().AutoHeight().Padding(0.0, 8.0, 0.0, 0.0)
+				[
+					Action
+				];
+				ActionWidgetMap.Add(*Patcher.Key,Action);
+			}
 		}
 	}
 	
@@ -120,8 +125,11 @@ void SPatchersPage::Construct(const FArguments& InArgs, TSharedPtr<FHotPatcherCo
 	[
 		Widget
 	];
-
-	HandleHotPatcherMenuEntryClicked(TEXT("ByPatch"),nullptr);
+	
+	if(FHotPatcherAction* DefaultAction = FHotPatcherActionManager::Get().GetTopActionByCategory(GetPageName()))
+	{
+		HandleHotPatcherMenuEntryClicked(UKismetTextLibrary::Conv_TextToString(DefaultAction->ActionName.Get()),nullptr);
+	}
 }
 
 EVisibility SPatchersPage::HandleOperatorConfigVisibility()const
@@ -131,7 +139,17 @@ EVisibility SPatchersPage::HandleOperatorConfigVisibility()const
 
 EVisibility SPatchersPage::HandleImportProjectConfigVisibility() const
 {
-	return GetContext()->GetModeName().IsEqual(TEXT("ByShaderPatch")) ? EVisibility::Hidden : EVisibility::Visible;
+	TArray<FString> EnableImportActions = {TEXT("ByPatch"),TEXT("ByRelease")};
+	bool bEnable = EnableImportActions.Contains(GetContext()->GetModeName().ToString());
+	return bEnable ? EVisibility::Visible : EVisibility::Hidden;
+}
+
+void SPatchersPage::SelectToAction(const FString& ActionName)
+{
+	if(FHotPatcherActionManager::Get().IsContainAction(GetPageName(),ActionName))
+	{
+		HandleHotPatcherMenuEntryClicked(ActionName,nullptr);
+	}
 }
 
 void SPatchersPage::HandleHotPatcherMenuEntryClicked(FString InModeName,TFunction<void(void)> ActionCallback)

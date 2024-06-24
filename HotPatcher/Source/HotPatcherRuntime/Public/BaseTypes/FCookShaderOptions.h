@@ -1,8 +1,8 @@
 #pragma once
+#include "BaseTypes.h"
 
 #include "CoreMinimal.h"
 #include "FCookShaderOptions.generated.h"
-
 
 UENUM(BlueprintType)
 enum class EShaderLibNameRule : uint8
@@ -12,7 +12,6 @@ enum class EShaderLibNameRule : uint8
 	CUSTOM
 };
 
-#define AS_PROJECTDIR_MARK TEXT("[PROJECTDIR]")
 
 USTRUCT(BlueprintType)
 struct FCookShaderOptions
@@ -20,14 +19,14 @@ struct FCookShaderOptions
 	GENERATED_BODY()
 	FCookShaderOptions()
 	{
-		ShderLibMountPointRegular = FString::Printf(TEXT("%s/ShaderLibs"),AS_PROJECTDIR_MARK);
+		ShaderLibMountPointRegular = FString::Printf(TEXT("%s/ShaderLibs"),AS_PROJECTDIR_MARK);
 	}
-	FString GetShaderLibMountPointRegular()const { return ShderLibMountPointRegular; }
+	FString GetShaderLibMountPointRegular()const { return ShaderLibMountPointRegular; }
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	bool bSharedShaderLibrary = false;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	bool bNativeShader = false;
+	bool bNativeShader = true;
 	// metallib and metalmap to pak?
 	bool bNativeShaderToPak = false;
 	// if name is StartContent to ShaderArchive-StarterContent-PCD3D_SM5.ushaderbytecode
@@ -36,5 +35,5 @@ struct FCookShaderOptions
 	UPROPERTY(EditAnywhere, BlueprintReadWrite,meta=(EditCondition="ShaderNameRule==EShaderLibNameRule::CUSTOM"))
 	FString CustomShaderName;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	FString ShderLibMountPointRegular;
+	FString ShaderLibMountPointRegular;
 };

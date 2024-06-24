@@ -5,15 +5,14 @@
 #include "CreatePatch/HotPatcherContext.h"
 #include "CreatePatch/ScopedSlowTaskContext.h"
 #include "CreatePatch/HotPatcherContext.h"
-
 #include "FlibHotPatcherCoreHelper.h"
-#include "ShaderPatch/FlibShaderCodeLibraryHelper.h"
+#include "ShaderLibUtils/FlibShaderCodeLibraryHelper.h"
 #include "Cooker/MultiCooker/FCookShaderCollectionProxy.h"
+#include "AssetRegistry.h"
 
 // engine header
 #include "Async/Async.h"
 #include "CoreGlobals.h"
-#include "AssetRegistryState.h"
 #include "ShaderCompiler.h"
 #include "Dom/JsonValue.h"
 #include "HAL/PlatformFilemanager.h"
@@ -31,6 +30,7 @@
 #include "Cooker/MultiCooker/FlibHotCookerHelper.h"
 #include "Cooker/MultiCooker/FSingleCookerSettings.h"
 #include "Cooker/MultiCooker/SingleCookerProxy.h"
+#include "DependenciesParser/FDefaultAssetDependenciesParser.h"
 #include "Misc/DataDrivenPlatformInfoRegistry.h"
 #include "Serialization/ArrayWriter.h"
 #include "ThreadUtils/FProcWorkerThread.hpp"
@@ -45,30 +45,7 @@ UPatcherProxy::UPatcherProxy(const FObjectInitializer& ObjectInitializer):Super(
 
 bool UPatcherProxy::CanExportPatch()const
 {
-	bool bCanExport = false;
-	FExportPatchSettings* NoConstSettingObject = const_cast<UPatcherProxy*>(this)->GetSettingObject();
-	if (NoConstSettingObject)
-	{
-		bool bHasBase = false;
-		if (NoConstSettingObject->IsByBaseVersion())
-			bHasBase = !NoConstSettingObject->GetBaseVersion().IsEmpty() && FPaths::FileExists(NoConstSettingObject->GetBaseVersion());
-		else
-			bHasBase = true;
-		bool bHasVersionId = !NoConstSettingObject->GetVersionId().IsEmpty();
-		bool bHasFilter = !!NoConstSettingObject->GetAssetIncludeFilters().Num();
-		bool bHasSpecifyAssets = !!NoConstSettingObject->GetIncludeSpecifyAssets().Num();
-		bool bHasSavePath = !NoConstSettingObject->GetSaveAbsPath().IsEmpty();
-		bool bHasPakPlatfotm = !!NoConstSettingObject->GetPakTargetPlatforms().Num();
-
-		bool bHasAnyPakFiles = (
-			bHasFilter || bHasSpecifyAssets ||
-			NoConstSettingObject->IsIncludeEngineIni() ||
-			NoConstSettingObject->IsIncludePluginIni() ||
-			NoConstSettingObject->IsIncludeProjectIni()
-			);
-		bCanExport = bHasBase && bHasVersionId && bHasAnyPakFiles && bHasPakPlatfotm && bHasSavePath;
-	}
-	return bCanExport;
+	return UFlibPatchParserHelper::IsValidPatchSettings(const_cast<UPatcherProxy*>(this)->GetSettingObject(),false);
 }
 
 FString GetShaderLibDeterministicCmdByPlatforms(const TArray<FString>& PlatformNames)
@@ -112,7 +89,7 @@ namespace PatchWorker
 	// setup 7.1
 	bool PatchAssetRegistryWorker(FHotPatcherPatchContext& Context);
 	// setup 7.2
-	bool GenerateGlobalAssetRegistryData(FHotPatcherPatchContext& Context);
+	bool GenerateGlobalAssetRegistryManifest(FHotPatcherPatchContext& Context);
 	// setup 8
 	bool GeneratePakProxysWorker(FHotPatcherPatchContext& Context);
 	// setup 9
@@ -128,7 +105,7 @@ namespace PatchWorker
 	// setup 14 serialize patch config
 	bool SavePatchConfigWorker(FHotPatcherPatchContext& Context);
 	// setup 15
-	bool BackupMetadataWorker(FHotPatcherPatchContext& Context);
+	// bool BackupMetadataWorker(FHotPatcherPatchContext& Context);
 	// setup 16
 	bool ShowSummaryWorker(FHotPatcherPatchContext& Context);
 	// setup 17
@@ -151,13 +128,35 @@ namespace PatchWorker
 		{
 			if(Context.GetSettingObject()->IsPackageTracker() && PackageTrackerByDiff.IsValid())
 			{
+				TArray<FString> IgnoreFilters  = UFlibAssetManageHelper::DirectoriesToStrings(Context.GetSettingObject()->GetAssetIgnoreFilters());
+				TArray<FString> ForceSkipFilters = UFlibAssetManageHelper::DirectoriesToStrings(Context.GetSettingObject()->GetForceSkipContentRules());
+				TSet<FString> ForceSkipAssets = UFlibAssetManageHelper::SoftObjectPathsToStringsSet(Context.GetSettingObject()->GetForceSkipAssets());
+				TSet<FName> ForceSkipTypes = UFlibAssetManageHelper::GetClassesNames(Context.GetSettingObject()->GetForceSkipClasses());
+				
 				TArray<FAssetDetail> TrackerAssetDetails;
 				for(const auto& TrackPackage:PackageTrackerByDiff->GetTrackResult())
 				{
-					TrackerAssetDetails.AddUnique(TrackPackage.Value);
-					Context.AddAsset(ChunkInfo.ChunkName,TrackPackage.Value);
+					bool bSkiped = FAssetDependenciesParser::IsForceSkipAsset(TrackPackage.Key.ToString(),ForceSkipTypes,IgnoreFilters,ForceSkipFilters,ForceSkipAssets,true);
+					bool bContainInBaseVersion = FTrackPackageAction::IsAssetContainIn(Context.BaseVersion.AssetInfo,TrackPackage.Value);
+					if(!bSkiped && !bContainInBaseVersion)
+					{
+						TrackerAssetDetails.AddUnique(TrackPackage.Value);
+						Context.AddAsset(ChunkInfo.ChunkName,TrackPackage.Value);
+					}
 				}
 			}
+		}
+		static bool IsAssetContainIn(const FAssetDependenciesInfo& InAssetInfo,const FAssetDetail& InAssetDetail)
+		{
+			bool bContainInBaseVersion = false;
+			FSoftObjectPath SoftObjectPath{InAssetDetail.PackagePath};
+			FAssetDetail BaseAssetDetail;
+			bool bHasInBase = InAssetInfo.GetAssetDetailByPackageName(SoftObjectPath.GetLongPackageName(),BaseAssetDetail);
+			if(bHasInBase)
+			{
+				bContainInBaseVersion = (BaseAssetDetail.Guid == InAssetDetail.Guid);
+			}
+			return bContainInBaseVersion;
 		}
 	private:
 		FHotPatcherPatchContext& Context;
@@ -165,21 +164,46 @@ namespace PatchWorker
 		TArray<ETargetPlatform> Platforms;
 		TSharedPtr<FPackageTrackerByDiff> PackageTrackerByDiff;
 	};
+
+	template<typename T>
+	void ExportStructToFile(FHotPatcherPatchContext& Context,T& Settings,const FString& SaveTo,bool bNotify,const FString& NotifyName)
+	{
+		FString SerializedJsonStr;
+		THotPatcherTemplateHelper::TSerializeStructAsJsonString(Settings,SerializedJsonStr);
+		if (FFileHelper::SaveStringToFile(SerializedJsonStr, *SaveTo))
+		{
+			if(::IsRunningCommandlet())
+			{
+				FString Msg = FString::Printf(TEXT("Export %s to %s."),*NotifyName,*SaveTo);
+				Context.OnPaking.Broadcast(TEXT("SavedPatchConfig"),Msg);
+			}else if(bNotify)
+			{
+				FString MsgStr = FString::Printf(TEXT("Export %s to Successfuly."),*NotifyName);
+				FText Msg = UKismetTextLibrary::Conv_StringToText(MsgStr);
+				FHotPatcherDelegates::Get().GetNotifyFileGenerated().Broadcast(Msg, SaveTo);
+			}
+		}
+	};
 }
 
 #define ADD_PATCH_WORKER(FUNC_NAME) AddPatchWorker(ANSI_TO_TCHAR(#FUNC_NAME),&FUNC_NAME);
 
 void UPatcherProxy::Init(FPatcherEntitySettingBase* InSetting)
 {
+	SCOPED_NAMED_EVENT_TEXT("UPatcherProxy::Init",FColor::Red);
 	Super::Init(InSetting);
 #if WITH_PACKAGE_CONTEXT
-	PlatformSavePackageContexts = UFlibHotPatcherCoreHelper::CreatePlatformsPackageContexts(GetSettingObject()->GetPakTargetPlatforms(),GetSettingObject()->IoStoreSettings.bIoStore);
+	PlatformSavePackageContexts = UFlibHotPatcherCoreHelper::CreatePlatformsPackageContexts(
+		GetSettingObject()->GetPakTargetPlatforms(),
+		GetSettingObject()->IoStoreSettings.bIoStore,
+		GetSettingObject()->GetStorageCookedDir()
+		);
 #endif
 	UFlibAssetManageHelper::UpdateAssetMangerDatabase(true);
 	GetSettingObject()->Init();
-
 	ADD_PATCH_WORKER(PatchWorker::BaseVersionReader);
 	ADD_PATCH_WORKER(PatchWorker::MakeCurrentVersionWorker);
+	ADD_PATCH_WORKER(PatchWorker::SavePatchConfigWorker);
 	ADD_PATCH_WORKER(PatchWorker::ParseVersionDiffWorker);
 	ADD_PATCH_WORKER(PatchWorker::ParseDiffAssetOnlyWorker);
 	ADD_PATCH_WORKER(PatchWorker::PatchRequireChekerWorker);
@@ -190,15 +214,14 @@ void UPatcherProxy::Init(FPatcherEntitySettingBase* InSetting)
 	// cook finished
 	ADD_PATCH_WORKER(PatchWorker::PostCookPatchAssets);
 	ADD_PATCH_WORKER(PatchWorker::PatchAssetRegistryWorker);
-	ADD_PATCH_WORKER(PatchWorker::GenerateGlobalAssetRegistryData);
+	ADD_PATCH_WORKER(PatchWorker::GenerateGlobalAssetRegistryManifest);
 	ADD_PATCH_WORKER(PatchWorker::GeneratePakProxysWorker);
 	ADD_PATCH_WORKER(PatchWorker::CreatePakWorker);
 	ADD_PATCH_WORKER(PatchWorker::CreateIoStoreWorker);
 	ADD_PATCH_WORKER(PatchWorker::SaveDifferenceWorker);
 	ADD_PATCH_WORKER(PatchWorker::SaveNewReleaseWorker);
 	ADD_PATCH_WORKER(PatchWorker::SavePakFileInfoWorker);
-	ADD_PATCH_WORKER(PatchWorker::SavePatchConfigWorker);
-	ADD_PATCH_WORKER(PatchWorker::BackupMetadataWorker);
+	// ADD_PATCH_WORKER(PatchWorker::BackupMetadataWorker);
 	ADD_PATCH_WORKER(PatchWorker::ShowSummaryWorker);
 	ADD_PATCH_WORKER(PatchWorker::OnFaildDispatchWorker);
 }
@@ -210,6 +233,7 @@ void UPatcherProxy::Shutdown()
 
 bool UPatcherProxy::DoExport()
 {
+	FScopedNamedEventStatic DoExportTag(FColor::Red,*FString::Printf(TEXT("DoExport_%s"),*GetSettingObject()->VersionId));
 	PatchContext = MakeShareable(new FHotPatcherPatchContext);
 	PatchContext->PatchProxy = this;
 	PatchContext->OnPaking.AddLambda([this](const FString& One,const FString& Msg){this->OnPaking.Broadcast(One,Msg);});
@@ -273,6 +297,28 @@ namespace PatchWorker
 		SCOPED_NAMED_EVENT_TEXT("MakeCurrentVersionWorker",FColor::Red);
 		UE_LOG(LogHotPatcher,Display,TEXT("Make Patch Setting..."));
 		TimeRecorder ExportNewVersionTR(TEXT("Make Release Chunk/Export Release Version Info By Chunk"));
+
+		// import cook dir and uasset / not-uasset directories to settings
+		if(Context.GetSettingObject()->IsImportProjectSettings())
+		{
+			UFlibHotPatcherCoreHelper::ImportProjectSettingsToScannerConfig(Context.GetSettingObject()->GetAssetScanConfigRef());
+			
+			ETargetPlatform AddProjectDirToTarget = ETargetPlatform::AllPlatforms;
+            
+			TSet<ETargetPlatform> AllConfigPlatformSet;
+			for(const auto& PakTargetPlatform:Context.GetSettingObject()->GetPakTargetPlatforms())
+			{
+				AllConfigPlatformSet.Add(PakTargetPlatform);
+			}
+            
+			AddProjectDirToTarget = AllConfigPlatformSet.Num() > 1 ? ETargetPlatform::AllPlatforms : AllConfigPlatformSet.Array()[0];
+			
+			UFlibHotPatcherCoreHelper::ImportProjectNotAssetDir(
+				Context.GetSettingObject()->GetAddExternAssetsToPlatform(),
+				AddProjectDirToTarget
+				);
+		}
+		
 		Context.NewVersionChunk = UFlibHotPatcherCoreHelper::MakeChunkFromPatchSettings(Context.GetSettingObject());
 
 		UE_LOG(LogHotPatcher,Display,TEXT("Deserialize Release Version by Patch Setting..."));
@@ -282,7 +328,8 @@ namespace PatchWorker
 			FDateTime::UtcNow().ToString(),
 			Context.NewVersionChunk,
 			Context.GetSettingObject()->IsIncludeHasRefAssetsOnly(),
-			Context.GetSettingObject()->IsAnalysisFilterDependencies()
+			Context.GetSettingObject()->IsAnalysisFilterDependencies(),
+			Context.GetSettingObject()->GetHashCalculator()
 		);
 		return true;
 	};
@@ -321,7 +368,8 @@ namespace PatchWorker
 				FDateTime::UtcNow().ToString(),
 				DiffChunk,
 				Context.GetSettingObject()->IsIncludeHasRefAssetsOnly(),
-				Context.GetSettingObject()->IsAnalysisFilterDependencies()
+				Context.GetSettingObject()->IsAnalysisFilterDependencies(),
+				Context.GetSettingObject()->GetHashCalculator()
 			);
 			{
 				TimeRecorder DiffTR(TEXT("Base Version And Diff Version total time"));
@@ -338,12 +386,15 @@ namespace PatchWorker
 		SCOPED_NAMED_EVENT_TEXT("PatchRequireChekerWorker",FColor::Red);
 		bool result = true;
 		TimeRecorder CheckRequireTR(TEXT("Check Patch Require"));
-		FString ReceiveMsg;
-		if (!Context.GetSettingObject()->IsCookPatchAssets() && !UFlibHotPatcherCoreHelper::CheckPatchRequire(Context.VersionDiff,Context.GetSettingObject()->GetPakTargetPlatformNames(), ReceiveMsg))
-		{
-			Context.OnShowMsg.Broadcast(ReceiveMsg);
-			result = false;
-		}
+		// FString ReceiveMsg;
+		// if (!Context.GetSettingObject()->IsCookPatchAssets() &&
+		// 	!UFlibHotPatcherCoreHelper::CheckPatchRequire(
+		// 	Context.GetSettingObject()->GetStorageCookedDir(),
+		// 	Context.VersionDiff,Context.GetSettingObject()->GetPakTargetPlatformNames(), ReceiveMsg))
+		// {
+		// 	Context.OnShowMsg.Broadcast(ReceiveMsg);
+		// 	result = false;
+		// }
 		return result;
 	};
 
@@ -452,56 +503,6 @@ namespace PatchWorker
 				}
 			}
 		}
-		else
-		{
-			TimeRecorder AnalysisChunkTR(TEXT("Analysis Chunk Info(not enable chunk)"));
-			// 分析所选过滤器中的资源所依赖的过滤器添加到Chunk中
-			// 因为默认情况下Chunk的过滤器不会进行依赖分析，当bEnableChunk未开启时，之前导出的Chunk中的过滤器不包含Patch中所选过滤器进行依赖分析之后的所有资源的模块。
-			{
-				TArray<FString> DependenciesFilters;
-			
-				auto GetKeysLambda = [&DependenciesFilters](const FAssetDependenciesInfo& Assets)
-				{
-					const TArray<FAssetDetail>& AllAssets = Assets.GetAssetDetails();
-					for (const auto& Asset : AllAssets)
-					{
-						FString Path;
-						FString Filename;
-						FString Extension;
-						FPaths::Split(Asset.PackagePath.ToString(), Path, Filename, Extension);
-						DependenciesFilters.AddUnique(Path);
-					}
-				};
-				GetKeysLambda(Context.VersionDiff.AssetDiffInfo.AddAssetDependInfo);
-				GetKeysLambda(Context.VersionDiff.AssetDiffInfo.ModifyAssetDependInfo);
-
-				TArray<FDirectoryPath> DepOtherModule;
-
-				for (const auto& DependenciesFilter : DependenciesFilters)
-				{
-					if (!!Context.NewVersionChunk.AssetIncludeFilters.Num())
-					{
-						for (const auto& includeFilter : Context.NewVersionChunk.AssetIncludeFilters)
-						{
-							if (!includeFilter.Path.StartsWith(DependenciesFilter))
-							{
-								FDirectoryPath FilterPath;
-								FilterPath.Path = DependenciesFilter;
-								DepOtherModule.Add(FilterPath);
-							}
-						}
-					}
-					else
-					{
-						FDirectoryPath FilterPath;
-						FilterPath.Path = DependenciesFilter;
-						DepOtherModule.Add(FilterPath);
-
-					}
-				}
-				Context.NewVersionChunk.AssetIncludeFilters.Append(DepOtherModule);
-			}
-		}
 		
 		bool bEnableChunk = Context.GetSettingObject()->IsEnableChunk();
 
@@ -535,8 +536,9 @@ namespace PatchWorker
 			{
 				for(auto& Chunk:Context.PakChunks)
 				{
-					FString SavePath = FPaths::Combine(Context.GetSettingObject()->GetSaveAbsPath(),Context.CurrentVersion.VersionId,TEXT("Metadatas"),Chunk.ChunkName,PlatformName);
-					TArray<FString> FoundShaderLibs = UFlibShaderCodeLibraryHelper::FindCookedShaderLibByPlatform(PlatformName,SavePath);
+					FString ChunkSavedDir = Context.GetSettingObject()->GetChunkSavedDir(Context.CurrentVersion.VersionId,Context.CurrentVersion.BaseVersionId,Chunk.ChunkName,PlatformName);
+					FString SavePath = FPaths::Combine(ChunkSavedDir,TEXT("Metadatas"),PlatformName);
+					TArray<FString> FoundShaderLibs = UFlibShaderCodeLibraryHelper::FindCookedShaderLibByPlatform(PlatformName,SavePath,false);
 		
 					if(Context.PakChunks.Num())
 					{
@@ -554,11 +556,12 @@ namespace PatchWorker
 								FString FileExtersion = FPaths::GetExtension(FilePath,false);
 									
 								AddShaderLib.Type = EPatchAssetType::NEW;
-								AddShaderLib.FilePath.FilePath = FPaths::ConvertRelativePathToFull(FilePath);
+								AddShaderLib.SetFilePath(FPaths::ConvertRelativePathToFull(FilePath));
 								AddShaderLib.MountPath = FPaths::Combine(
 									UFlibPatchParserHelper::ParserMountPointRegular(Chunk.CookShaderOptions.GetShaderLibMountPointRegular()),
 									FString::Printf(TEXT("%s.%s"),*FileName,*FileExtersion)
 									);
+								AddShaderLib.GenerateFileHash(Context.GetSettingObject()->GetHashCalculator());
 							}
 							Context.AddExternalFile(PlatformName,Chunk.ChunkName,AddShaderLib);
 						}
@@ -588,22 +591,33 @@ namespace PatchWorker
 					THotPatcherTemplateHelper::GetEnumValueByName(PlatformName,Platform);
 
 					FChunkAssetDescribe ChunkAssetsDescrible = UFlibPatchParserHelper::CollectFChunkAssetsDescribeByChunk(
+						Context.GetSettingObject(),
 						Context.VersionDiff,
-						Chunk,
-						TArray<ETargetPlatform>{Platform}
+						Chunk, TArray<ETargetPlatform>{Platform}
 					);
 					
 					const TArray<FAssetDetail>& ChunkAssets = ChunkAssetsDescrible.Assets.GetAssetDetails();
-
-					if(Context.GetSettingObject()->IsCookPatchAssets())
+					Context.PatchProxy->GetPatcherResult().PatcherAssetDetails.Append(ChunkAssets);
+					bool bSharedShaderLibrary = Context.GetSettingObject()->GetCookShaderOptions().bSharedShaderLibrary;
+					if(Context.GetSettingObject()->IsCookPatchAssets() || bSharedShaderLibrary)
 					{
+						TArray<FAssetDetail> AllShaderAssets;
+						bool bOnlyCookShaders = !Context.GetSettingObject()->IsCookPatchAssets() && bSharedShaderLibrary;
+						if(bOnlyCookShaders) // only cook shaders
+						{
+							SCOPED_NAMED_EVENT_TEXT("ParserAllShaderAssets",FColor::Red);
+							TSet<FName> ShadersClasses = UFlibHotPatcherCoreHelper::GetAllMaterialClassesNames();
+							for(const auto& Asset:ChunkAssets){
+								if(ShadersClasses.Contains(Asset.AssetType)){ AllShaderAssets.Add(Asset);}
+							}
+						}
 						FTrackPackageAction TrackChunkPackageAction(Context,Chunk,TArray<ETargetPlatform>{Platform});
 						FSingleCookerSettings EmptySetting;
 						EmptySetting.MissionID = 0;
 						EmptySetting.MissionName = FString::Printf(TEXT("%s_Cooker_%s"),FApp::GetProjectName(),*Chunk.ChunkName);
 						EmptySetting.ShaderLibName = Chunk.GetShaderLibraryName();
 						EmptySetting.CookTargetPlatforms = TArray<ETargetPlatform>{Platform};
-						EmptySetting.CookAssets = ChunkAssets;
+						EmptySetting.CookAssets = bOnlyCookShaders ? AllShaderAssets: ChunkAssets;
 						// EmptySetting.ForceSkipClasses = {};
 						EmptySetting.bPackageTracker = Context.GetSettingObject()->IsPackageTracker();
 						EmptySetting.ShaderOptions.bSharedShaderLibrary = Context.GetSettingObject()->GetCookShaderOptions().bSharedShaderLibrary;
@@ -612,12 +626,20 @@ namespace PatchWorker
 						EmptySetting.IoStoreSettings = Context.GetSettingObject()->GetIoStoreSettings();
 						EmptySetting.IoStoreSettings.bStorageBulkDataInfo = false;// dont save platform context data to disk
 						EmptySetting.bSerializeAssetRegistry = Context.GetSettingObject()->GetSerializeAssetRegistryOptions().bSerializeAssetRegistry;
-						EmptySetting.bPreGeneratePlatformData = false;
-						EmptySetting.bWaitEachAssetCompleted = false;
-						EmptySetting.bConcurrentSave = false;
+						EmptySetting.bPreGeneratePlatformData = Context.GetSettingObject()->IsCookParallelSerialize();
+						EmptySetting.bWaitEachAssetCompleted = Context.GetSettingObject()->IsCookParallelSerialize();
+						EmptySetting.bConcurrentSave = Context.GetSettingObject()->IsCookParallelSerialize();
+						// for current impl arch
+						EmptySetting.bForceCookInOneFrame = true;
+						EmptySetting.NumberOfAssetsPerFrame = Context.GetSettingObject()->CookAdvancedOptions.NumberOfAssetsPerFrame;
+						EmptySetting.OverrideNumberOfAssetsPerFrame = Context.GetSettingObject()->CookAdvancedOptions.GetOverrideNumberOfAssetsPerFrame();
 						EmptySetting.bDisplayConfig = false;
-						EmptySetting.StorageCookedDir = FPaths::Combine(FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir()),TEXT("Cooked"));
-						EmptySetting.StorageMetadataDir = FPaths::Combine(Context.GetSettingObject()->GetSaveAbsPath(),Context.CurrentVersion.VersionId,TEXT("Metadatas"),Chunk.ChunkName);
+						EmptySetting.StorageCookedDir = Context.GetSettingObject()->GetStorageCookedDir();//FPaths::Combine(FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir()),TEXT("Cooked"));
+
+						EmptySetting.bAccompanyCook = Context.GetSettingObject()->CookAdvancedOptions.bAccompanyCookForShader;
+						
+						FString ChunkSavedDir = Context.GetSettingObject()->GetChunkSavedDir(Context.CurrentVersion.VersionId,Context.CurrentVersion.BaseVersionId,Chunk.ChunkName,PlatformName);
+						EmptySetting.StorageMetadataDir = FPaths::Combine(ChunkSavedDir,TEXT("Metadatas"));
 #if WITH_PACKAGE_CONTEXT
 						EmptySetting.bOverrideSavePackageContext = true;
 						EmptySetting.PlatformSavePackageContexts = Context.PatchProxy->GetPlatformSavePackageContexts();
@@ -626,8 +648,68 @@ namespace PatchWorker
 						SingleCookerProxy->AddToRoot();
 						SingleCookerProxy->Init(&EmptySetting);
 						bool bExportStatus = SingleCookerProxy->DoExport();
+						const FCookCluster& AdditionalCluster = SingleCookerProxy->GetPackageTrackerAsCluster(false);
+						for(const auto& AssetDetail:AdditionalCluster.AssetDetails)
+						{
+							FSoftObjectPath ObjectPath{AssetDetail.PackagePath};
+							bool bContainInBaseVersion = FTrackPackageAction::IsAssetContainIn(Context.BaseVersion.AssetInfo,AssetDetail);
+							
+							FString ReceiveReason;
+							if(!Context.GetSettingObject()->GetAssetScanConfig().IsMatchForceSkip(ObjectPath,ReceiveReason) && !bContainInBaseVersion)
+							{
+								Context.PatchProxy->GetPatcherResult().PatcherAssetDetails.Add(AssetDetail);
+								Context.VersionDiff.AssetDiffInfo.AddAssetDependInfo.AddAssetsDetail(AssetDetail);
+							}
+							else
+							{
+								UE_LOG(LogHotPatcher,Display,TEXT("[PackageTracker] %s Match ForceSkipRule,Reason %s"),*ObjectPath.GetLongPackageName(),*ReceiveReason);
+							}
+						}
+						
 						SingleCookerProxy->Shutdown();
 						SingleCookerProxy->RemoveFromRoot();
+
+#if WITH_UE5_BY_COOKCMDLT // add WP additional
+						TSet<FName> WorldPackages;
+						int32 Size = ChunkAssets.Num();
+						FCriticalSection	LocalSynchronizationObject;
+						ParallelFor(Size,[&](int32 index)
+						{
+							if(ChunkAssets[index].AssetType.IsEqual(TEXT("World")))
+							{
+								FScopeLock Lock(&LocalSynchronizationObject);
+								WorldPackages.Add(ChunkAssets[index].PackagePath);
+							}
+						});
+						FString StorageCookedDir = Context.GetSettingObject()->GetStorageCookedDir();
+						for(const auto& WorldPackage:WorldPackages)
+						{
+							FExternDirectoryInfo DirectoryInfo;
+							{
+								FSoftObjectPath ObjectPath{WorldPackage};
+								// abs
+								FString WorldCookedPath = UFlibHotPatcherCoreHelper::GetAssetCookedSavePath(StorageCookedDir,ObjectPath.GetLongPackageName(), PlatformName);
+								FString EndWith = FPaths::GetExtension(WorldCookedPath,true);
+								WorldCookedPath.RemoveFromEnd(EndWith);
+								// // mount path
+								FString WorldMountPath = WorldCookedPath;
+								WorldMountPath.RemoveFromStart(FPaths::Combine(StorageCookedDir,PlatformName));
+								WorldMountPath = FString::Printf(TEXT("../../..%s"),*WorldMountPath);
+								FPaths::NormalizeFilename(WorldMountPath);
+						
+								DirectoryInfo.DirectoryPath.Path = WorldCookedPath;
+								DirectoryInfo.MountPoint = WorldMountPath;
+							}
+							if(FPaths::DirectoryExists(DirectoryInfo.DirectoryPath.Path))
+							{
+								const TArray<FExternFileInfo>& WPAdditional = UFlibPatchParserHelper::ParserExDirectoryAsExFiles(TArray<FExternDirectoryInfo>{DirectoryInfo},Context.GetSettingObject()->GetHashCalculator());
+								for(const auto& WPAdditionalFile:WPAdditional)
+								{
+									Context.AddExternalFile(PlatformName,Chunk.ChunkName,WPAdditionalFile);
+								}
+							}
+						}
+#endif
 					}
 				}
 			}
@@ -646,10 +728,10 @@ namespace PatchWorker
 				ETargetPlatform Platform;
 				THotPatcherTemplateHelper::GetEnumValueByName(PlatformName,Platform);
 				FChunkAssetDescribe ChunkAssetsDescrible = UFlibPatchParserHelper::CollectFChunkAssetsDescribeByChunk(
-						Context.VersionDiff,
-						Chunk,
-						TArray<ETargetPlatform>{Platform}
-					);
+					Context.GetSettingObject(),
+					Context.VersionDiff,
+					Chunk, TArray<ETargetPlatform>{Platform}
+				);
 				const TArray<FAssetDetail>& ChunkAssets = ChunkAssetsDescrible.Assets.GetAssetDetails();
 				
 				if(Context.GetSettingObject()->GetSerializeAssetRegistryOptions().bSerializeAssetRegistry)
@@ -657,16 +739,13 @@ namespace PatchWorker
 					FString ChunkAssetRegistryName = Context.GetSettingObject()->GetSerializeAssetRegistryOptions().GetAssetRegistryNameRegular(Chunk.ChunkName);
 					// // Save the generated registry
 					FString AssetRegistryPath = FPaths::Combine(
-						Context.GetSettingObject()->GetSaveAbsPath(),
-						Context.NewVersionChunk.ChunkName,
-						PlatformName,
-						ChunkAssetRegistryName)
-					;
-					if(UFlibHotPatcherCoreHelper::SerializeAssetRegistryByDetails(PlatformName,ChunkAssets,AssetRegistryPath))
+						Context.GetSettingObject()->GetChunkSavedDir(Context.CurrentVersion.VersionId,Context.BaseVersion.VersionId,Context.NewVersionChunk.ChunkName,PlatformName),
+						ChunkAssetRegistryName);
+					if(UFlibHotPatcherCoreHelper::SerializeAssetRegistryByDetails(Context.PatchProxy->GetAssetRegistry(),PlatformName,ChunkAssets, AssetRegistryPath))
 					{
 						FExternFileInfo AssetRegistryFileInfo;
 						AssetRegistryFileInfo.Type = EPatchAssetType::NEW;
-						AssetRegistryFileInfo.FilePath.FilePath = AssetRegistryPath;
+						AssetRegistryFileInfo.SetFilePath(AssetRegistryPath);
 						AssetRegistryFileInfo.MountPath = FPaths::Combine(
 							UFlibPatchParserHelper::ParserMountPointRegular(Context.GetSettingObject()->GetSerializeAssetRegistryOptions().GetAssetRegistryMountPointRegular())
 							,ChunkAssetRegistryName
@@ -698,28 +777,33 @@ namespace PatchWorker
 					}
 					break;
 				}
+				default:{}
 			};
 		}
 		return true;
 	};
-	bool GenerateGlobalAssetRegistryData(FHotPatcherPatchContext& Context)
+	bool GenerateGlobalAssetRegistryManifest(FHotPatcherPatchContext& Context)
 	{
-		SCOPED_NAMED_EVENT_TEXT("GenerateGlobalAssetRegistryData",FColor::Red);
-		FAssetDependenciesInfo TotalDiffAssets = UFlibAssetManageHelper::CombineAssetDependencies(Context.VersionDiff.AssetDiffInfo.AddAssetDependInfo,Context.VersionDiff.AssetDiffInfo.ModifyAssetDependInfo);
-		const TArray<FAssetDetail>& AllAssets = TotalDiffAssets.GetAssetDetails();
+		SCOPED_NAMED_EVENT_TEXT("GenerateGlobalAssetRegistryManifest",FColor::Red);
+		if(Context.GetSettingObject()->GetSerializeAssetRegistryOptions().bSerializeAssetRegistryManifest)
+		{
+			FAssetDependenciesInfo TotalDiffAssets = UFlibAssetManageHelper::CombineAssetDependencies(Context.VersionDiff.AssetDiffInfo.AddAssetDependInfo,Context.VersionDiff.AssetDiffInfo.ModifyAssetDependInfo);
+			const TArray<FAssetDetail>& AllAssets = TotalDiffAssets.GetAssetDetails();
 
-		TSet<FName> PackageAssetsSet;
-		for(const auto& Asset:AllAssets)
-		{
-			FString LongPackageName = UFlibAssetManageHelper::PackagePathToLongPackageName(Asset.PackagePath.ToString());
-			PackageAssetsSet.Add(*LongPackageName);
-		}
-		for(const auto& PlatformName:Context.GetSettingObject()->GetPakTargetPlatformNames())
-		{
-			ITargetPlatform* PlatformIns = UFlibHotPatcherCoreHelper::GetPlatformByName(PlatformName);
+			TSet<FName> PackageAssetsSet;
+			for(const auto& Asset:AllAssets)
+			{
+				FString LongPackageName = UFlibAssetManageHelper::PackagePathToLongPackageName(Asset.PackagePath.ToString());
+				PackageAssetsSet.Add(*LongPackageName);
+			}
+			for(const auto& PlatformName:Context.GetSettingObject()->GetPakTargetPlatformNames())
+			{
+				ITargetPlatform* PlatformIns = UFlibHotPatcherCoreHelper::GetPlatformByName(PlatformName);
 			
-			UFlibHotPatcherCoreHelper::GeneratorGlobalAssetRegistryData(PlatformIns,PackageAssetsSet,TSet<FName>{},true);
+				UFlibHotPatcherCoreHelper::SerializeChunksManifests(PlatformIns,PackageAssetsSet,TSet<FName>{},true);
+			}
 		}
+		
 		return true;
 	}
 
@@ -803,39 +887,13 @@ namespace PatchWorker
 			TArray<FString> PatchedPakCommand;
 			for(const auto& PakAssetPath: PakCommand.PakCommands)
 			{
-				auto RemoveDoubleQuoteLambda = [](const FString& InStr)->FString
-				{
-					FString resultStr = InStr;
-					if(resultStr.StartsWith(TEXT("\"")))
-					{
-						resultStr.RemoveAt(0);
-					}
-					if(resultStr.EndsWith(TEXT("\"")))
-					{
-						resultStr.RemoveAt(resultStr.Len() - 1);
-					}
-					return resultStr;
-				};
-
-				auto ParseUassetLambda = [&RemoveDoubleQuoteLambda](const FString& InAsset)->FPakCommandItem
-				{
-					FPakCommandItem result;
-					TArray<FString> AssetPakCmd = UKismetStringLibrary::ParseIntoArray(InAsset,TEXT("\" "));
-
-					FString AssetAbsPath = AssetPakCmd[0];
-					FString AssetMountPath = AssetPakCmd[1];
-					result.AssetAbsPath = RemoveDoubleQuoteLambda(AssetAbsPath);
-					result.AssetMountPath = RemoveDoubleQuoteLambda(AssetMountPath);
-					return result;
-				};
-
-				FPakCommandItem PakAssetInfo = ParseUassetLambda(PakAssetPath);
+				FPakCommandItem PakAssetInfo = UFlibHotPatcherCoreHelper::ParsePakResponseFileLine(PakAssetPath);
 				if(Context.GetSettingObject()->GetBinariesPatchConfig().IsMatchIgnoreRules(PakAssetInfo))
 				{
 					PatchedPakCommand.AddUnique(PakAssetPath);
 					continue;
 				}
-				FString ProjectCookedDir = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(),TEXT("Cooked")));
+				FString ProjectCookedDir = Context.GetSettingObject()->GetStorageCookedDir();// FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(),TEXT("Cooked")));
 				FString OldAsset = PakAssetInfo.AssetAbsPath.Replace(
 					*ProjectCookedDir,
 					*OldCookedDir,ESearchCase::CaseSensitive);
@@ -893,7 +951,8 @@ namespace PatchWorker
 					Context.OnPaking.Broadcast(TEXT("ExportPatch"),*Dialog.ToString());
 					Context.UnrealPakSlowTask->EnterProgressFrame(1.0, Dialog);
 				}
-				FString ChunkSaveBasePath = FPaths::Combine(Context.GetSettingObject()->GetSaveAbsPath(), Context.CurrentVersion.VersionId, PlatformName);
+
+				FString ChunkSaveBasePath = Context.GetSettingObject()->GetChunkSavedDir(Context.CurrentVersion.VersionId,Context.CurrentVersion.BaseVersionId,Chunk.ChunkName,PlatformName);
 				
 				TArray<FPakCommand> ChunkPakListCommands;
 				{
@@ -977,7 +1036,7 @@ namespace PatchWorker
 				if (!ChunkPakListCommands.Num())
 				{
 					FString Msg = FString::Printf(TEXT("Chunk:%s not contain any file!!!"), *Chunk.ChunkName);
-					UE_LOG(LogHotPatcher, Error, TEXT("%s"),*Msg);
+					UE_LOG(LogHotPatcher, Warning, TEXT("%s"),*Msg);
 					Context.OnShowMsg.Broadcast(Msg);
 					continue;
 				}
@@ -989,11 +1048,18 @@ namespace PatchWorker
 					SinglePakForChunk.PakCommands = ChunkPakListCommands;
 					// add extern file to pak(version file)
 					SinglePakForChunk.PakCommands.Append(Context.AdditionalFileToPak);
+
+					FReplacePakRegular PakPathRegular{
+						Context.CurrentVersion.VersionId,
+						Context.CurrentVersion.BaseVersionId,
+						Chunk.ChunkName,
+						PlatformName
+					};
 					
-					const FString ChunkPakName = UFlibHotPatcherCoreHelper::MakePakShortName(Context.CurrentVersion,Chunk,PlatformName,Context.GetSettingObject()->GetPakNameRegular());
+					const FString ChunkPakName = UFlibHotPatcherCoreHelper::ReplacePakRegular(PakPathRegular,Context.GetSettingObject()->GetPakNameRegular());
 					SinglePakForChunk.ChunkStoreName = ChunkPakName;
 					SinglePakForChunk.StorageDirectory = ChunkSaveBasePath;
-					Chunk.PakFileProxys.Add(SinglePakForChunk);
+					Chunk.GetPakFileProxys().Add(SinglePakForChunk);
 				}
 				else
 				{
@@ -1021,7 +1087,7 @@ namespace PatchWorker
 						}
 						CurrentPak.ChunkStoreName = Path;
 						CurrentPak.StorageDirectory = FPaths::Combine(ChunkSaveBasePath, Chunk.ChunkName);
-						Chunk.PakFileProxys.Add(CurrentPak);
+						Chunk.GetPakFileProxys().Add(CurrentPak);
 					}
 				}
 			}
@@ -1041,7 +1107,7 @@ namespace PatchWorker
 				
 			// // Update SlowTask Progress
 			{
-				FText Dialog = FText::Format(NSLOCTEXT("ExportPatch", "GeneratedPak", "Generating Pak list of Chunk {0}."), FText::FromString(Chunk.ChunkName));
+				FText Dialog = FText::Format(NSLOCTEXT("ExportPatch_GeneratedPakList", "GeneratedPak", "Generating Pak list of Chunk {0}."), FText::FromString(Chunk.ChunkName));
 				Context.OnPaking.Broadcast(TEXT("GeneratedPak"),*Dialog.ToString());
 				Context.UnrealPakSlowTask->EnterProgressFrame(1.0, Dialog);
 			}
@@ -1055,7 +1121,7 @@ namespace PatchWorker
 			// TMap<FString,TArray<FPakFileInfo>>& PakFilesInfoMap = Context.PakFilesInfoMap;
 				
 			// 创建chunk的pak文件
-			for (const auto& PakFileProxy : Chunk.PakFileProxys)
+			for (const auto& PakFileProxy : Chunk.GetPakFileProxys())
 			{
 				FString PlatformName = THotPatcherTemplateHelper::GetEnumNameByValue(PakFileProxy.Platform);
 				TArray<FString> UnrealPakCommandletOptions;
@@ -1101,11 +1167,12 @@ namespace PatchWorker
 							{
 								if(::IsRunningCommandlet())
 								{
-									FString Msg = FString::Printf(TEXT("Successed to Package the patch as %s."),*PakSavePath);
+									FString Msg = FString::Printf(TEXT("Package the Patch as %s."),*PakSavePath);
 									Context.OnPaking.Broadcast(TEXT("SavedPakFile"),Msg);
 								}else
 								{
-									FText Msg = LOCTEXT("SavedPakFileMsg", "Successed to Package the patch as Pak.");
+									FString MsgStr = FString::Printf(TEXT("Package %s for %s Successfuly."),*Chunk.ChunkName,*PlatformName);
+									FText Msg = UKismetTextLibrary::Conv_StringToText(MsgStr);
 									FHotPatcherDelegates::Get().GetNotifyFileGenerated().Broadcast(Msg,PakSavePath);
 								}
 								FPakFileInfo CurrentPakInfo;
@@ -1126,7 +1193,7 @@ namespace PatchWorker
 							}
 						}//);
 							
-						if (!Chunk.bStorageUnrealPakList)
+						if (!(Context.GetSettingObject()->bStorageUnrealPakList && Chunk.bStorageUnrealPakList && Chunk.bOutputDebugInfo))
 						{
 							IFileManager::Get().Delete(*PakListFile);
 						}
@@ -1159,20 +1226,20 @@ namespace PatchWorker
 				
 			// // Update SlowTask Progress
 			{
-				FText Dialog = FText::Format(NSLOCTEXT("ExportPatch", "GeneratedPak", "Generating Io Store list of Chunk {0}."), FText::FromString(Chunk.ChunkName));
+				FText Dialog = FText::Format(NSLOCTEXT("ExportPatch_GeneratedPak", "GeneratedPak", "Generating Io Store list of Chunk {0}."), FText::FromString(Chunk.ChunkName));
 				Context.OnPaking.Broadcast(TEXT("GeneratedIoStore"),*Dialog.ToString());
 				Context.UnrealPakSlowTask->EnterProgressFrame(1.0, Dialog);
 			}
 
 			TArray<FReplaceText> ReplacePakListTexts = Context.GetSettingObject()->GetReplacePakListTexts();
-			if(!Chunk.PakFileProxys.Num())
+			if(!Chunk.GetPakFileProxys().Num())
 			{
 				UE_LOG(LogHotPatcher,Error,TEXT("Chunk %s Not Contain Any valid PakFileProxy!!!"),*Chunk.ChunkName);
 				continue;
 			}
 			// 创建chunk的Io Store文件
 			TArray<FString> IoStoreCommands;
-			for (const auto& PakFileProxy : Chunk.PakFileProxys)
+			for (const auto& PakFileProxy : Chunk.GetPakFileProxys())
 			{
 				if(!IoStoreSettings.PlatformContainers.Contains(PakFileProxy.Platform))
 					return true;
@@ -1222,7 +1289,7 @@ namespace PatchWorker
 #else
 				FString OutputDirectoryCmd = TEXT("");
 #endif
-				FString IoStoreCommandsFile = FPaths::Combine(Chunk.PakFileProxys[0].StorageDirectory,FString::Printf(TEXT("%s_IoStoreCommands.txt"),*Chunk.ChunkName));
+				FString IoStoreCommandsFile = FPaths::Combine(Chunk.GetPakFileProxys()[0].StorageDirectory,FString::Printf(TEXT("%s_IoStoreCommands.txt"),*Chunk.ChunkName));
 					
 				FString PlatformGlocalContainers;
 				// FString BasePacakgeRootDir = FPaths::ConvertRelativePathToFull(UFlibPatchParserHelper::ReplaceMarkPath(Context.GetSettingObject()->GetIoStoreSettings().PlatformContainers.Find(PakFileProxy.Platform)->BasePackageStagedRootDir.Path));
@@ -1236,7 +1303,7 @@ namespace PatchWorker
 					PlatformGlocalContainers = GlobalUtocFile;
 				}
 					
-				FString PlatformCookDir = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectDir(),TEXT("Saved/Cooked/"),PlatformName));
+				FString PlatformCookDir = FPaths::ConvertRelativePathToFull(FPaths::Combine(Context.GetSettingObject()->GetStorageCookedDir(),PlatformName));
 
 				if(FPaths::FileExists(PlatformGlocalContainers))
 				{
@@ -1294,29 +1361,34 @@ namespace PatchWorker
 			auto SavePatchDiffJsonLambda = [&Context](const FHotPatcherVersion& InSaveVersion, const FPatchVersionDiff& InDiff)->bool
 			{
 				bool bStatus = false;
-				if (Context.GetSettingObject()->IsSaveDiffAnalysis())
+				for(ETargetPlatform Platform:Context.GetSettingObject()->PakTargetPlatforms)
 				{
-					auto SerializeChangedAssetInfo = [](const FPatchVersionDiff& InAssetInfo)->FString
+					FString PlatformName = THotPatcherTemplateHelper::GetEnumNameByValue(Platform);
+					if (Context.GetSettingObject()->IsSaveDiffAnalysis())
 					{
-						FString AddAssets;
-						THotPatcherTemplateHelper::TSerializeStructAsJsonString(InAssetInfo,AddAssets);
-						return AddAssets;
-					};
+						auto SerializeChangedAssetInfo = [](const FPatchVersionDiff& InAssetInfo)->FString
+						{
+							FString AddAssets;
+							THotPatcherTemplateHelper::TSerializeStructAsJsonString(InAssetInfo,AddAssets);
+							return AddAssets;
+						};
 		
-					FString SerializeDiffInfo = SerializeChangedAssetInfo(InDiff);
+						FString SerializeDiffInfo = SerializeChangedAssetInfo(InDiff);
 		
-					// FString::Printf(TEXT("%s"),*SerializeDiffInfo);
+						// FString::Printf(TEXT("%s"),*SerializeDiffInfo);
 
-					FString SaveDiffToFile = FPaths::Combine(
-						Context.GetSettingObject()->GetCurrentVersionSavePath(),
-						FString::Printf(TEXT("%s_%s_Diff.json"), *InSaveVersion.BaseVersionId, *InSaveVersion.VersionId)
-					);
-					if (UFlibAssetManageHelper::SaveStringToFile(SaveDiffToFile, SerializeDiffInfo))
-					{
-						bStatus = true;
+						FString SaveDiffToFile = FPaths::Combine(
+							// Context.GetSettingObject()->GetCurrentVersionSavePath(),
+							Context.GetSettingObject()->GetChunkSavedDir(InSaveVersion.VersionId,InSaveVersion.BaseVersionId,TEXT(""),PlatformName),
+							FString::Printf(TEXT("%s_%s_Diff.json"), *InSaveVersion.BaseVersionId, *InSaveVersion.VersionId)
+						);
+						if (UFlibAssetManageHelper::SaveStringToFile(SaveDiffToFile, SerializeDiffInfo))
+						{
+							bStatus = true;
 
-						FString Msg = FString::Printf(TEXT("Succeed to export New Patch Diff Info."),*SaveDiffToFile);
-						Context.OnPaking.Broadcast(TEXT("SavePatchDiffInfo"),Msg);
+							FString Msg = FString::Printf(TEXT("Succeed to export New Patch Diff Info."),*SaveDiffToFile);
+							Context.OnPaking.Broadcast(TEXT("SavePatchDiffInfo"),Msg);
+						}
 					}
 				}
 				return bStatus;
@@ -1370,11 +1442,11 @@ namespace PatchWorker
 			{
 				if(::IsRunningCommandlet())
 				{
-					FString Msg = FString::Printf(TEXT("Succeed to export New Release Info to %s."),*SaveCurrentVersionToFile);
+					FString Msg = FString::Printf(TEXT("Export NewRelease to %s."),*SaveCurrentVersionToFile);
 					Context.OnPaking.Broadcast(TEXT("SavePatchDiffInfo"),Msg);
 				}else
 				{
-					auto Msg = LOCTEXT("SavePatchDiffInfo", "Succeed to export New Release Info.");
+					auto Msg = LOCTEXT("SavePatchDiffInfo", "Export NewRelease Successfuly.");
 					FHotPatcherDelegates::Get().GetNotifyFileGenerated().Broadcast(Msg, SaveCurrentVersionToFile);
 				}
 			}
@@ -1386,6 +1458,15 @@ namespace PatchWorker
 	bool SavePakFileInfoWorker(FHotPatcherPatchContext& Context)
 	{
 		SCOPED_NAMED_EVENT_TEXT("SavePakFileInfoWorker",FColor::Red);
+		const FPatherResult& PatherResult = Context.PatchProxy->GetPatcherResult();
+		FString PakResultPath = FPaths::Combine(
+			Context.GetSettingObject()->GetCurrentVersionSavePath(),
+			FString::Printf(TEXT("%s_PakResults.json"),*Context.CurrentVersion.VersionId)
+		);
+		if(PatherResult.PatcherAssetDetails.Num())
+		{
+			ExportStructToFile(Context,PatherResult,PakResultPath,true,TEXT("PakResults"));
+		}
 		if(!Context.GetSettingObject()->IsStoragePakFileInfo())
 			return true;
 		if(Context.GetSettingObject())
@@ -1413,11 +1494,11 @@ namespace PatchWorker
 				{
 					if(::IsRunningCommandlet())
 					{
-						FString Msg = FString::Printf(TEXT("Successed to Export the Pak File info to ."),*SavePakFilesPath);
+						FString Msg = FString::Printf(TEXT("Export PakFileInfo to %s."),*SavePakFilesPath);
 						Context.OnPaking.Broadcast(TEXT("SavedPakFileMsg"),Msg);
 					}else
 					{
-						FText Msg = LOCTEXT("SavedPakFileMsg", "Successed to Export the Pak File info.");
+						FText Msg = LOCTEXT("SavedPakFileMsg_ExportSuccessed", "Export PakFileInfo Successfuly.");
 						FHotPatcherDelegates::Get().GetNotifyFileGenerated().Broadcast(Msg, SavePakFilesPath);
 					}
 				}
@@ -1430,68 +1511,69 @@ namespace PatchWorker
 	bool SavePatchConfigWorker(FHotPatcherPatchContext& Context)
 	{
 		SCOPED_NAMED_EVENT_TEXT("SavePatchConfigWorker",FColor::Red);
-		if(Context.GetPakFileNum())
+		
+		TimeRecorder TR(FString::Printf(TEXT("Save patch config")));
+		FText DiaLogMsg = FText::Format(NSLOCTEXT("ExportPatch", "ExportPatchConfig", "Generating Current Patch Config of version {0}"), FText::FromString(Context.CurrentVersion.VersionId));
+		if(::IsRunningCommandlet())
 		{
-			TimeRecorder TR(FString::Printf(TEXT("Save patch config")));
-			FText DiaLogMsg = FText::Format(NSLOCTEXT("ExportPatch", "ExportPatchConfig", "Generating Current Patch Config of version {0}"), FText::FromString(Context.CurrentVersion.VersionId));
-			if(::IsRunningCommandlet())
+			Context.OnPaking.Broadcast(TEXT("ExportPatchConfig"),*DiaLogMsg.ToString());	
+		}
+		else
+		{	
+			Context.UnrealPakSlowTask->EnterProgressFrame(1.0, DiaLogMsg);
+		}
+		if (Context.GetSettingObject()->IsSaveConfig())
+		{
+			TArray<ETargetPlatform> PakTargetPlatforms = Context.GetSettingObject()->GetPakTargetPlatforms();
+			for(ETargetPlatform Platform:PakTargetPlatforms)
 			{
-				Context.OnPaking.Broadcast(TEXT("ExportPatchConfig"),*DiaLogMsg.ToString());	
+				FString PlatformName = THotPatcherTemplateHelper::GetEnumNameByValue(Platform);
+				FString SavedBaseDir = Context.GetSettingObject()->GetChunkSavedDir(Context.CurrentVersion.VersionId,Context.CurrentVersion.BaseVersionId,Context.GetSettingObject()->GetVersionId(),PlatformName);
+				FString SaveConfigPath = FPaths::Combine(
+				SavedBaseDir,
+					FString::Printf(TEXT("%s_%s_PatchConfig.json"),*PlatformName,*Context.CurrentVersion.VersionId)
+				);
+				FExportPatchSettings TempPatchSettings = *Context.GetSettingObject();
+				TempPatchSettings.PakTargetPlatforms.Empty();
+				TempPatchSettings.PakTargetPlatforms.Add(Platform);
+				ExportStructToFile(Context,TempPatchSettings,SaveConfigPath,false,TEXT("PatchConfig"));
 			}
-			else
-			{	
-				Context.UnrealPakSlowTask->EnterProgressFrame(1.0, DiaLogMsg);
-			}
-
-			FString SaveConfigPath = FPaths::Combine(
-				Context.GetSettingObject()->GetCurrentVersionSavePath(),
-				FString::Printf(TEXT("%s_PatchConfig.json"),*Context.CurrentVersion.VersionId)
-			);
-
-			if (Context.GetSettingObject()->IsSaveConfig())
+			if(PakTargetPlatforms.Num())
 			{
-				FString SerializedJsonStr;
-				THotPatcherTemplateHelper::TSerializeStructAsJsonString(*Context.GetSettingObject(),SerializedJsonStr);
-				if (FFileHelper::SaveStringToFile(SerializedJsonStr, *SaveConfigPath))
-				{
-					if(::IsRunningCommandlet())
-					{
-						FString Msg = FString::Printf(TEXT("Successed to Export the Patch Config to %s."),*SaveConfigPath);
-						Context.OnPaking.Broadcast(TEXT("SavedPatchConfig"),Msg);
-					}else
-					{
-						FText Msg = LOCTEXT("SavedPatchConfig", "Successed to Export the Patch Config.");
-						FHotPatcherDelegates::Get().GetNotifyFileGenerated().Broadcast(Msg, SaveConfigPath);
-					}
-				}
+				FString SaveConfigPath = FPaths::Combine(
+					Context.GetSettingObject()->GetCurrentVersionSavePath(),
+					FString::Printf(TEXT("%s_PatchConfig.json"),*Context.CurrentVersion.VersionId)
+				);
+				ExportStructToFile(Context,*Context.GetSettingObject(),SaveConfigPath,true,TEXT("PatchConfig"));
 			}
 		}
+		
 		return true;
 	};
 	
 	// setup 15
-	bool BackupMetadataWorker(FHotPatcherPatchContext& Context)
-	{
-		SCOPED_NAMED_EVENT_TEXT("BackupMetadataWorker",FColor::Red);
-		// backup Metadata
-		if(Context.GetPakFileNum())
-		{
-			TimeRecorder TR(FString::Printf(TEXT("Backup Metadata")));
-			FText DiaLogMsg = FText::Format(NSLOCTEXT("BackupMetadata", "BackupMetadata", "Backup Release {0} Metadatas."), FText::FromString(Context.GetSettingObject()->GetVersionId()));
-			Context.UnrealPakSlowTask->EnterProgressFrame(1.0, DiaLogMsg);
-			if(Context.GetSettingObject()->IsBackupMetadata())
-			{
-				UFlibHotPatcherCoreHelper::BackupMetadataDir(
-					FPaths::ProjectDir(),
-					FApp::GetProjectName(),
-					Context.GetSettingObject()->GetPakTargetPlatforms(),
-					FPaths::Combine(Context.GetSettingObject()->GetSaveAbsPath(),
-					Context.GetSettingObject()->GetVersionId())
-				);
-			}
-		}
-		return true;
-	};
+	// bool BackupMetadataWorker(FHotPatcherPatchContext& Context)
+	// {
+	// 	SCOPED_NAMED_EVENT_TEXT("BackupMetadataWorker",FColor::Red);
+	// 	// backup Metadata
+	// 	if(Context.GetPakFileNum())
+	// 	{
+	// 		TimeRecorder TR(FString::Printf(TEXT("Backup Metadata")));
+	// 		FText DiaLogMsg = FText::Format(NSLOCTEXT("BackupMetadata", "BackupMetadata", "Backup Release {0} Metadatas."), FText::FromString(Context.GetSettingObject()->GetVersionId()));
+	// 		Context.UnrealPakSlowTask->EnterProgressFrame(1.0, DiaLogMsg);
+	// 		if(Context.GetSettingObject()->IsBackupMetadata())
+	// 		{
+	// 			UFlibHotPatcherCoreHelper::BackupMetadataDir(
+	// 				FPaths::ProjectDir(),
+	// 				FApp::GetProjectName(),
+	// 				Context.GetSettingObject()->GetPakTargetPlatforms(),
+	// 				FPaths::Combine(Context.GetSettingObject()->GetSaveAbsPath(),
+	// 				Context.GetSettingObject()->GetVersionId())
+	// 			);
+	// 		}
+	// 	}
+	// 	return true;
+	// };
 
 	// setup 16
 	bool ShowSummaryWorker(FHotPatcherPatchContext& Context)
@@ -1512,7 +1594,7 @@ namespace PatchWorker
 		SCOPED_NAMED_EVENT_TEXT("OnFaildDispatchWorker",FColor::Red);
 		if (!Context.GetPakFileNum())
 		{
-			UE_LOG(LogHotPatcher, Error, TEXT("The Patch not contain any invalie file!"));
+			UE_LOG(LogHotPatcher, Warning, TEXT("The Patch not contain any invalie file!"));
 			Context.OnShowMsg.Broadcast(TEXT("The Patch not contain any invalie file!"));
 		}
 		else

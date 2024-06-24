@@ -37,9 +37,9 @@ public:
 public:
 	FText HandlePatchModeComboButtonContentText() const;
 	void HandleHotPatcherMenuEntryClicked(FString InModeName,TFunction<void(void)> ActionCallback);
-
+	virtual FString GetPageName()const override { return TEXT("Patcher"); };
 	EVisibility HandleOperatorConfigVisibility()const;
 	EVisibility HandleImportProjectConfigVisibility()const;
-
+	virtual void SelectToAction(const FString& ActionName);
 
 };

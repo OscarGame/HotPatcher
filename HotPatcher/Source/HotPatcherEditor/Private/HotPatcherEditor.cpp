@@ -27,6 +27,11 @@
 #include "Interfaces/IPluginManager.h"
 #include "Kismet/KismetTextLibrary.h"
 #include "PakFileUtilities.h"
+#include "Misc/EngineVersionComparison.h"
+
+#if !UE_VERSION_OLDER_THAN(5,1,0)
+	typedef FAppStyle FEditorStyle;
+#endif
 
 #if ENGINE_MAJOR_VERSION < 5
 #include "Widgets/Docking/SDockableTab.h"
@@ -39,10 +44,9 @@
 #include "CreatePatch/AssetActions/AssetTypeActions_PrimaryAssetLabel.h"
 #endif
 
-FExportPatchSettings* GPatchSettings = nullptr;
-FExportReleaseSettings* GReleaseSettings = nullptr;
-
 static const FName HotPatcherTabName("HotPatcher");
+
+DEFINE_LOG_CATEGORY(LogHotPatcherEdotor)
 
 #define LOCTEXT_NAMESPACE "FHotPatcherEditorModule"
 
@@ -66,12 +70,21 @@ FHotPatcherEditorModule& FHotPatcherEditorModule::Get()
 
 void FHotPatcherEditorModule::StartupModule()
 {
+	UE_LOG(LogHotPatcherEdotor,Display,TEXT("FHotPatcherEditorModule StartupModule"));
 	// This code will execute after your module is loaded into memory; the exact timing is specified in the .uplugin file per-module
 	FHotPatcherStyle::Initialize();
 	FHotPatcherStyle::ReloadTextures();
 	FHotPatcherCommands::Register();
 
 	FHotPatcherActionManager::Get().Init();
+
+	
+#if !UE_VERSION_OLDER_THAN(5,1,0)
+	StyleSetName = FEditorStyle::GetAppStyleSetName().ToString();
+#else
+	StyleSetName = FEditorStyle::GetStyleSetName().ToString();
+#endif
+
 	
 	FHotPatcherDelegates::Get().GetNotifyFileGenerated().AddLambda([](FText Msg,const FString& File)
 	{
@@ -90,11 +103,6 @@ void FHotPatcherEditorModule::StartupModule()
 	MissionNotifyProay->AddToRoot();
 	
 	PluginCommands = MakeShareable(new FUICommandList);
-	PluginCommands->MapAction(
-		FHotPatcherCommands::Get().PluginAction,
-		FExecuteAction::CreateRaw(this, &FHotPatcherEditorModule::PluginButtonClicked),
-		FCanExecuteAction());
-	
 	FLevelEditorModule& LevelEditorModule = FModuleManager::LoadModuleChecked<FLevelEditorModule>("LevelEditor");
 	{
 		TSharedPtr<FExtender> MenuExtender = MakeShareable(new FExtender());
@@ -102,11 +110,18 @@ void FHotPatcherEditorModule::StartupModule()
 
 		LevelEditorModule.GetMenuExtensibilityManager()->AddExtender(MenuExtender);
 
+#ifndef DISABLE_PLUGIN_TOOLBAR_MENU
 		// settings
 	 	TSharedPtr<FExtender> ToolbarExtender = MakeShareable(new FExtender);
-	 	ToolbarExtender->AddToolBarExtension("Settings", EExtensionHook::After, PluginCommands, FToolBarExtensionDelegate::CreateRaw(this, &FHotPatcherEditorModule::AddToolbarExtension));
-
+#if ENGINE_MAJOR_VERSION > 4
+		FName ExtensionHook = "Play";
+#else
+		FName ExtensionHook = "Settings";
+#endif
+	 	ToolbarExtender->AddToolBarExtension(ExtensionHook, EExtensionHook::After, PluginCommands, FToolBarExtensionDelegate::CreateRaw(this, &FHotPatcherEditorModule::AddToolbarExtension));
+		
 	 	LevelEditorModule.GetToolBarExtensibilityManager()->AddExtender(ToolbarExtender);
+#endif
 	}
 
 	TSharedRef<FUICommandList> CommandList = LevelEditorModule.GetGlobalLevelEditorActions();
@@ -121,6 +136,7 @@ void FHotPatcherEditorModule::StartupModule()
 	CreateRootMenu();
 
 	FAssetToolsModule::GetModule().Get().RegisterAssetTypeActions(MakeShareable(new FAssetTypeActions_PrimaryAssetLabel));
+
 #endif
 }
 
@@ -130,10 +146,6 @@ void FHotPatcherEditorModule::ShutdownModule()
 {
 	// This function may be called during shutdown to clean up your module.  For modules that support dynamic reloading,
 	// we call this function before unloading the module.
-	if(DockTab.IsValid())
-	{
-		DockTab->RequestCloseTab();
-	}
 	FHotPatcherActionManager::Get().Shutdown();
 	FHotPatcherCommands::Unregister();
 	FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(HotPatcherTabName);
@@ -144,37 +156,134 @@ void FHotPatcherEditorModule::OpenDockTab()
 {
 	if(!DockTab.IsValid() || !GPatchSettings)
 	{
-		PluginButtonClicked();
+		FSHotPatcherContext Context;
+		Context.Category = TEXT("Patcher");
+		Context.ActionName = TEXT("ByPatch");
+		PluginButtonClicked(Context);
 	}
 }
 
-void FHotPatcherEditorModule::PluginButtonClicked()
+void FHotPatcherEditorModule::PluginButtonClicked(const FSHotPatcherContext& Context)
 {
-	if(!DockTab.IsValid())
+	if(DockTab.IsValid())
 	{
-		FGlobalTabmanager::Get()->RegisterNomadTabSpawner(HotPatcherTabName, FOnSpawnTab::CreateRaw(this, &FHotPatcherEditorModule::OnSpawnPluginTab))
-	    .SetDisplayName(LOCTEXT("FHotPatcherTabTitle", "HotPatcher"))
-	    .SetMenuType(ETabSpawnerMenuType::Hidden);
+		FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(HotPatcherTabName);
+		DockTab.Reset();
+	}
+	
+	if (!DockTab.IsValid())
+	{
+		FGlobalTabmanager::Get()->RegisterNomadTabSpawner(HotPatcherTabName, FOnSpawnTab::CreateLambda([=](const class FSpawnTabArgs& InSpawnTabArgs)
+		{
+			return SpawnHotPatcherTab(Context);
+		}))
+		.SetDisplayName(LOCTEXT("FHotPatcherTabTitle", "HotPatcher"))
+		.SetMenuType(ETabSpawnerMenuType::Hidden);
 	}
 	FGlobalTabmanager::Get()->InvokeTab(HotPatcherTabName);
 }
 
 void FHotPatcherEditorModule::OnTabClosed(TSharedRef<SDockTab> InTab)
 {
+	FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(HotPatcherTabName);
 	DockTab.Reset();
 }
 
 void FHotPatcherEditorModule::AddMenuExtension(FMenuBuilder& Builder)
 {
-	Builder.AddMenuEntry(FHotPatcherCommands::Get().PluginAction);
+	FSlateIcon EmptyIcon(FHotPatcherStyle::GetStyleSetName(), "HotPatcher.PluginAction");
+	Builder.AddSubMenu(
+		FText::FromString(TEXT("HotPatcher")),
+		FText::FromString(TEXT("HotPatcher")),
+		FNewMenuDelegate::CreateLambda([=](FMenuBuilder& Menu)
+		{
+			Menu.AddWidget(this->HandlePickingModeContextMenu(),FText::FromString(TEXT("")),true);
+		}),
+		false,
+		EmptyIcon);
 }
-
 
 void FHotPatcherEditorModule::AddToolbarExtension(FToolBarBuilder& Builder)
 {
-	Builder.AddToolBarButton(FHotPatcherCommands::Get().PluginAction);
+	// Builder.AddToolBarButton(FHotPatcherCommands::Get().PluginAction);
+	
+	FSlateIcon EmptyIcon(FHotPatcherStyle::GetStyleSetName(), "HotPatcher.PluginAction");
+	Builder.AddComboButton(
+			FUIAction(
+				FExecuteAction(),
+				FCanExecuteAction::CreateLambda([]()->bool{return true;}),
+				FGetActionCheckState()
+			),
+			FOnGetContent::CreateLambda([this]()->TSharedRef<SWidget>
+			{
+				return this->HandlePickingModeContextMenu();
+			}),
+			FText::FromString(TEXT("HotPatcher")),
+			FText::GetEmpty(),
+			EmptyIcon
+		);
 }
 
+TSharedRef<SWidget> FHotPatcherEditorModule::HandlePickingModeContextMenu()
+{
+	const bool bShouldCloseWindowAfterMenuSelection = true;
+	FMenuBuilder MenuBuilder(bShouldCloseWindowAfterMenuSelection, nullptr);
+	FHotPatcherActionManager::FHotPatcherActionsType Actions = FHotPatcherActionManager::Get().GetHotPatcherActions();
+	TArray<FString> CategoryNames;
+	Actions.GetKeys(CategoryNames);
+
+	// for Main Page
+	{
+		FSlateIcon HotPatcherIcon(FHotPatcherStyle::GetStyleSetName(), "HotPatcher.PluginAction");
+		FSHotPatcherContext Context;
+		MenuBuilder.AddMenuEntry(
+			FText::FromString(TEXT("MAIN")),
+			FText::FromString(TEXT("MAIN")),
+			HotPatcherIcon,
+			FUIAction(FExecuteAction::CreateLambda([=]()
+			{
+				this->PluginButtonClicked(Context);
+			})));
+		MenuBuilder.AddMenuSeparator();
+	}
+	
+	for(int32 index = 0; index < CategoryNames.Num(); ++index)
+	{
+		TArray<FString> ActionKeys;
+		Actions.Find(CategoryNames[index])->GetKeys(ActionKeys);
+
+		FString CategoryName = CategoryNames[index];
+		if(CategoryName.Equals(TEXT("NoSlate"))){ continue; }
+		if(index && !(index % 2))
+		{
+			MenuBuilder.AddMenuSeparator();
+		}
+		MenuBuilder.AddSubMenu(
+			FText::FromString(CategoryName),
+			FText::FromString(CategoryName),
+			FNewMenuDelegate::CreateLambda([this,CategoryName,ActionKeys](FMenuBuilder& Menu)
+			{
+				for(const auto& ActionName:ActionKeys)
+				{
+					FSHotPatcherContext Context;
+					Context.Category = CategoryName;
+					Context.ActionName = ActionName;
+					Menu.AddMenuEntry(
+						FText::FromString(ActionName),
+						FText::FromString(ActionName),
+						FSlateIcon(),
+						FUIAction(FExecuteAction::CreateLambda([=]()
+						{
+							this->PluginButtonClicked(Context);
+						}))
+					);
+				}
+			}),
+			false
+		);
+	}
+	return MenuBuilder.MakeWidget();
+}
 
 
 TArray<FAssetData> FHotPatcherEditorModule::GetSelectedAssetsInBrowserContent()
@@ -194,7 +303,7 @@ TArray<FString> FHotPatcherEditorModule::GetSelectedFolderInBrowserContent()
 }
 
 
-TSharedRef<class SDockTab> FHotPatcherEditorModule::OnSpawnPluginTab(const class FSpawnTabArgs& InSpawnTabArgs)
+TSharedRef<SDockTab> FHotPatcherEditorModule::SpawnHotPatcherTab(const FSHotPatcherContext& Context)
 {
 	return SAssignNew(DockTab,SDockTab)
 		.TabRole(ETabRole::NomadTab)
@@ -203,10 +312,9 @@ TSharedRef<class SDockTab> FHotPatcherEditorModule::OnSpawnPluginTab(const class
 		.OnTabClosed(SDockTab::FOnTabClosedCallback::CreateRaw(this,&FHotPatcherEditorModule::OnTabClosed))
 		.Clipping(EWidgetClipping::ClipToBounds)
 		[
-			SNew(SHotPatcher)
+			SNew(SHotPatcher,Context)
 		];
 }
-
 
 #if WITH_EDITOR_SECTION 
 
@@ -216,33 +324,21 @@ void FHotPatcherEditorModule::CreateRootMenu()
 	FToolMenuSection& RootSection = RootMenu->AddSection("HotPatcherUtilities", LOCTEXT("HotPatcherUtilities", "HotPatcherUtilities"));;
 	RootSection.AddSubMenu(
 		"PatcherPresetsActionsSubMenu",
-		LOCTEXT("PatcherPresetsActionsSubMenuLabel", "HotPatcher Preset Actions"),
-		LOCTEXT("PatcherPresetsActionsSubMenuToolTip", "HotPatcher Preset Actions"),
+		LOCTEXT("PatcherPresetsActionsSubMenuLabel", "Preset Actions"),
+		LOCTEXT("PatcherPresetsActionsSubMenuToolTip", "Preset Actions"),
 		FNewToolMenuDelegate::CreateRaw(this, &FHotPatcherEditorModule::MakeHotPatcherPresetsActionsSubMenu),
 		FUIAction(
 			FExecuteAction()
 			),
 		EUserInterfaceActionType::Button,
 		false, 
-		FSlateIcon(FEditorStyle::GetStyleSetName(), "ContentBrowser.SaveAllCurrentFolder")
-		);
-	
-	RootSection.AddSubMenu(
-		"PakExternalFilesActionsSubMenu",
-		LOCTEXT("PakExternalFilesActionsSubMenuLabel", "Pak External Actions"),
-		LOCTEXT("PakExternalFilesActionsSubMenuToolTip", "Pak External Actions"),
-		FNewToolMenuDelegate::CreateRaw(this, &FHotPatcherEditorModule::MakePakExternalActionsSubMenu),
-		FUIAction(
-			FExecuteAction()
-			),
-		EUserInterfaceActionType::Button,
-		false, 
-		FSlateIcon(FEditorStyle::GetStyleSetName(), "ContentBrowser.SaveAllCurrentFolder")
+		FSlateIcon(*StyleSetName, "ContentBrowser.SaveAllCurrentFolder")
 		);
 }
 
 void FHotPatcherEditorModule::CreateAssetContextMenu(FToolMenuSection& InSection)
 {
+#if !WITH_UE5
 	InSection.AddSubMenu(
 		"CookActionsSubMenu",
 		LOCTEXT("CookActionsSubMenuLabel", "Cook Actions"),
@@ -253,8 +349,9 @@ void FHotPatcherEditorModule::CreateAssetContextMenu(FToolMenuSection& InSection
 			),
 		EUserInterfaceActionType::Button,
 		false, 
-		FSlateIcon(FEditorStyle::GetStyleSetName(), "ContentBrowser.AssetActions")
+		FSlateIcon(*StyleSetName, "ContentBrowser.AssetActions")
 		);
+#endif
 	InSection.AddSubMenu(
 		"CookAndPakActionsSubMenu",
 		LOCTEXT("CookAndPakActionsSubMenuLabel", "Cook And Pak Actions"),
@@ -265,18 +362,18 @@ void FHotPatcherEditorModule::CreateAssetContextMenu(FToolMenuSection& InSection
 			),
 		EUserInterfaceActionType::Button,
 		false, 
-		FSlateIcon(FEditorStyle::GetStyleSetName(), "ContentBrowser.SaveAllCurrentFolder")
+		FSlateIcon(*StyleSetName, "ContentBrowser.SaveAllCurrentFolder")
 		);
 	
 	// InSection.AddMenuEntry(FHotPatcherCommands::Get().AddToPakSettingsAction);
-	InSection.AddDynamicEntry("AddToPatchSettgins", FNewToolMenuSectionDelegate::CreateLambda([this](FToolMenuSection& InSection)
+	InSection.AddDynamicEntry("AddToPatchSettings", FNewToolMenuSectionDelegate::CreateLambda([this](FToolMenuSection& InSection)
 	{
-		const TAttribute<FText> Label = LOCTEXT("CookUtilities_AddToPatchSettgins", "Add To Patch Settgins");
-		const TAttribute<FText> ToolTip = LOCTEXT("CookUtilities_AddToPatchSettginsTooltip", "Add Selected Assets To HotPatcher Patch Settgins");
-		const FSlateIcon Icon = FSlateIcon(FEditorStyle::GetStyleSetName(), "ContentBrowser.AssetActions.Duplicate");
+		const TAttribute<FText> Label = LOCTEXT("CookUtilities_AddToPatchSettings", "Add To Patch Settings");
+		const TAttribute<FText> ToolTip = LOCTEXT("CookUtilities_AddToPatchSettingsTooltip", "Add Selected Assets To HotPatcher Patch Settings");
+		const FSlateIcon Icon = FSlateIcon(*StyleSetName, "ContentBrowser.AssetActions.Duplicate");
 		const FToolMenuExecuteAction UIAction = FToolMenuExecuteAction::CreateRaw(this,&FHotPatcherEditorModule::OnAddToPatchSettings);
 	
-		InSection.AddMenuEntry("CookUtilities_AddToPatchSettgins", Label, ToolTip, Icon, UIAction);
+		InSection.AddMenuEntry("CookUtilities_AddToPatchSettings", Label, ToolTip, Icon, UIAction);
 	}));
 	
 }
@@ -315,13 +412,8 @@ void FHotPatcherEditorModule::ExtendContentBrowserPathSelectionMenu()
 void FHotPatcherEditorModule::MakeCookActionsSubMenu(UToolMenu* Menu)
 {
 	FToolMenuSection& Section = Menu->AddSection("CookActionsSection");
-	UHotPatcherSettings* Settings = GetMutableDefault<UHotPatcherSettings>();
-	Settings->ReloadConfig();
-	
-	for (auto Platform : GetAllCookPlatforms())
+	for (auto Platform : GetAllowCookPlatforms())
 	{
-		if(Settings->bWhiteListCookInEditor && !Settings->PlatformWhitelists.Contains(Platform))
-			continue;
 		Section.AddMenuEntry(
             FName(*THotPatcherTemplateHelper::GetEnumNameByValue(Platform)),
             FText::Format(LOCTEXT("Platform", "{0}"), UKismetTextLibrary::Conv_StringToText(THotPatcherTemplateHelper::GetEnumNameByValue(Platform))),
@@ -339,63 +431,23 @@ void FHotPatcherEditorModule::MakeCookAndPakActionsSubMenu(UToolMenu* Menu)
 	FToolMenuSection& Section = Menu->AddSection("CookAndPakActionsSection");
 	UHotPatcherSettings* Settings = GetMutableDefault<UHotPatcherSettings>();
 	Settings->ReloadConfig();
-	for (auto Platform : GetAllCookPlatforms())
+	for (ETargetPlatform Platform : GetAllowCookPlatforms())
 	{
 		FString PlatformName = THotPatcherTemplateHelper::GetEnumNameByValue(Platform);
-		if(PlatformName.StartsWith(TEXT("All")))
-			continue;
-		if(Settings->bWhiteListCookInEditor && !Settings->PlatformWhitelists.Contains(Platform))
-			continue;
 		FToolMenuEntry& PlatformEntry = Section.AddSubMenu(FName(*PlatformName),
 			FText::Format(LOCTEXT("Platform", "{0}"), UKismetTextLibrary::Conv_StringToText(THotPatcherTemplateHelper::GetEnumNameByValue(Platform))),
 			FText(),
 			FNewMenuDelegate::CreateLambda([=](FMenuBuilder& SubMenuBuilder){
 				SubMenuBuilder.AddMenuEntry(
 					LOCTEXT("AnalysisDependencies", "AnalysisDependencies"), FText(),
-					FSlateIcon(FEditorStyle::GetStyleSetName(),TEXT("WorldBrowser.LevelsMenuBrush")),
+					FSlateIcon(*StyleSetName,TEXT("WorldBrowser.LevelsMenuBrush")),
 					FUIAction(FExecuteAction::CreateRaw(this, &FHotPatcherEditorModule::OnCookAndPakPlatform, Platform,true)), NAME_None, EUserInterfaceActionType::Button);
 				SubMenuBuilder.AddMenuEntry(
 					LOCTEXT("NoDependencies", "NoDependencies"), FText(),
-					FSlateIcon(FEditorStyle::GetStyleSetName(),TEXT("Level.SaveIcon16x")),
+					FSlateIcon(*StyleSetName,TEXT("Level.SaveIcon16x")),
 					FUIAction(FExecuteAction::CreateRaw(this, &FHotPatcherEditorModule::OnCookAndPakPlatform, Platform,false)), NAME_None, EUserInterfaceActionType::Button);
 			}
 			));
-		
-		// Section.AddMenuEntry(
-  //           FName(*THotPatcherTemplateHelper::GetEnumNameByValue(Platform)),
-  //           FText::Format(LOCTEXT("Platform", "{0}"), UKismetTextLibrary::Conv_StringToText(THotPatcherTemplateHelper::GetEnumNameByValue(Platform))),
-  //           FText(),
-  //           FSlateIcon(),
-  //           FUIAction(
-  //               FExecuteAction::CreateRaw(this, &FHotPatcherEditorModule::OnCookAndPakPlatform, Platform)
-  //           )
-        //);
-	}
-}
-
-void FHotPatcherEditorModule::MakePakExternalActionsSubMenu(UToolMenu* Menu)
-{
-	FToolMenuSection& Section = Menu->AddSection("PakExternalActionsSection");
-	UHotPatcherSettings* Settings = GetMutableDefault<UHotPatcherSettings>();
-	Settings->ReloadConfig();
-	for (FPakExternalInfo PakExternalConfig : Settings->PakExternalConfigs)
-	{
-		FString AppendPlatformName;
-		for(const auto& Platform:PakExternalConfig.TargetPlatforms)
-		{
-			AppendPlatformName += FString::Printf(TEXT("%s/"),*THotPatcherTemplateHelper::GetEnumNameByValue(Platform));
-		}
-		AppendPlatformName.RemoveFromEnd(TEXT("/"));
-		
-		Section.AddMenuEntry(
-			FName(*PakExternalConfig.PakName),
-			FText::Format(LOCTEXT("PakExternal", "{0} ({1})"), UKismetTextLibrary::Conv_StringToText(PakExternalConfig.PakName),UKismetTextLibrary::Conv_StringToText(AppendPlatformName)),
-			FText(),
-			FSlateIcon(),
-			FUIAction(
-				FExecuteAction::CreateRaw(this, &FHotPatcherEditorModule::OnPakExternal,PakExternalConfig)
-			)
-		);
 	}
 }
 
@@ -406,15 +458,21 @@ void FHotPatcherEditorModule::MakeHotPatcherPresetsActionsSubMenu(UToolMenu* Men
 	Settings->ReloadConfig();
 	for (FExportPatchSettings PakConfig : Settings->PresetConfigs)
 	{
-		Section.AddMenuEntry(
-			FName(*PakConfig.VersionId),
-			FText::Format(LOCTEXT("PakExternal", "VersionID: {0}"), UKismetTextLibrary::Conv_StringToText(PakConfig.VersionId)),
+		Section.AddSubMenu(FName(*PakConfig.VersionId),
+		FText::Format(LOCTEXT("PakExternal_VersionID", "{0}"), UKismetTextLibrary::Conv_StringToText(PakConfig.VersionId)),
 			FText(),
-			FSlateIcon(),
-			FUIAction(
-				FExecuteAction::CreateRaw(this, &FHotPatcherEditorModule::OnPakPreset,PakConfig)
-			)
-		);
+			FNewMenuDelegate::CreateLambda([=](FMenuBuilder& SubMenuBuilder)
+			{
+				for (ETargetPlatform Platform : GetAllowCookPlatforms())
+				{
+					FString PlatformName = THotPatcherTemplateHelper::GetEnumNameByValue(Platform);
+					SubMenuBuilder.AddMenuEntry(
+						FText::Format(LOCTEXT("PakPresetPlatform", "{0}"), UKismetTextLibrary::Conv_StringToText(PlatformName)),
+						FText(),
+						FSlateIcon(*StyleSetName,TEXT("WorldBrowser.LevelsMenuBrush")),
+						FUIAction(FExecuteAction::CreateRaw(this, &FHotPatcherEditorModule::OnPakPreset,PakConfig, Platform)), NAME_None, EUserInterfaceActionType::Button);
+				}
+			}));
 	}
 }
 
@@ -438,39 +496,20 @@ void FHotPatcherEditorModule::OnAddToPatchSettings(const FToolMenuContext& MenuC
 	{
 		FPatcherSpecifyAsset PatchSettingAssetElement;
 		FSoftObjectPath AssetObjectPath;
-		AssetObjectPath.SetPath(AssetData.ObjectPath.ToString());
+		AssetObjectPath.SetPath(UFlibAssetManageHelper::GetObjectPathByAssetData(AssetData));
 		PatchSettingAssetElement.Asset = AssetObjectPath;
+		PatchSettingAssetElement.bAnalysisAssetDependencies = true;
 		AssetsSoftPath.AddUnique(PatchSettingAssetElement);
 	}
-	GPatchSettings->IncludeSpecifyAssets.Append(AssetsSoftPath);
-	GPatchSettings->AssetIncludeFilters.Append(FolderDirectorys);
+	GPatchSettings->GetAssetScanConfigRef().IncludeSpecifyAssets.Append(AssetsSoftPath);
+	GPatchSettings->GetAssetScanConfigRef().AssetIncludeFilters.Append(FolderDirectorys);
 }
 
 void FHotPatcherEditorModule::OnPakPreset(FExportPatchSettings Config)
 {
-	UHotPatcherSettings* Settings = GetMutableDefault<UHotPatcherSettings>();
-	Settings->ReloadConfig();
-	
-	UPatcherProxy* PatcherProxy = NewObject<UPatcherProxy>();
-	PatcherProxy->AddToRoot();
-	Proxys.Add(PatcherProxy);
-	
-	PatcherProxy->Init(&Config);
-
-	if(!Config.IsStandaloneMode())
-	{
-		PatcherProxy->DoExport();
-	}
-	else
-	{
-		FString CurrentConfig;
-		THotPatcherTemplateHelper::TSerializeStructAsJsonString(Config,CurrentConfig);
-		FString SaveConfigTo = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(),TEXT("HotPatcher"),TEXT("PatchConfig.json")));
-		FFileHelper::SaveStringToFile(CurrentConfig,*SaveConfigTo);
-		FString MissionCommand = FString::Printf(TEXT("\"%s\" -run=HotPatcher -config=\"%s\" %s"),*UFlibPatchParserHelper::GetProjectFilePath(),*SaveConfigTo,*Config.GetCombinedAdditionalCommandletArgs());
-		UE_LOG(LogHotPatcher,Log,TEXT("HotPatcher %s Mission: %s %s"),*Config.VersionId,*UFlibHotPatcherCoreHelper::GetUECmdBinary(),*MissionCommand);
-		RunProcMission(UFlibHotPatcherCoreHelper::GetUECmdBinary(),MissionCommand,FString::Printf(TEXT("Mission: %s"),*Config.VersionId));
-	}
+	TSharedPtr<FExportPatchSettings> TmpPatchSettings = MakeShareable(new FExportPatchSettings);
+	*TmpPatchSettings = Config;
+	CookAndPakByPatchSettings(TmpPatchSettings,TmpPatchSettings->IsStandaloneMode());
 }
 
 #endif
@@ -521,9 +560,10 @@ void FHotPatcherEditorModule::OnCookPlatform(ETargetPlatform Platform)
 	EmptySetting.IoStoreSettings.bIoStore = false;
 	EmptySetting.bSerializeAssetRegistry = false;
 	EmptySetting.bDisplayConfig = false;
+	EmptySetting.bForceCookInOneFrame = true;
 	EmptySetting.StorageCookedDir = FPaths::Combine(FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir()),TEXT("Cooked"));
 	EmptySetting.StorageMetadataDir = FPaths::Combine(UFlibHotCookerHelper::GetCookerBaseDir(),EmptySetting.MissionName);
-
+	
 	USingleCookerProxy* SingleCookerProxy = NewObject<USingleCookerProxy>();
 	SingleCookerProxy->AddToRoot();
 	SingleCookerProxy->Init(&EmptySetting);
@@ -536,22 +576,11 @@ void FHotPatcherEditorModule::OnCookPlatform(ETargetPlatform Platform)
 	SingleCookerProxy->Shutdown();
 }
 
-void FHotPatcherEditorModule::OnPakExternal(FPakExternalInfo PakExternConfig)
+void FHotPatcherEditorModule::OnPakPreset(FExportPatchSettings Config, ETargetPlatform Platform)
 {
-	PatchSettings = MakeShareable(new FExportPatchSettings);
-	*PatchSettings = MakeTempPatchSettings(
-		PakExternConfig.PakName,
-		TArray<FDirectoryPath>{},
-		TArray<FPatcherSpecifyAsset>{},
-		TArray<FPlatformExternAssets>{PakExternConfig.AddExternAssetsToPlatform},
-		PakExternConfig.TargetPlatforms,
-		false
-	);
-
-	UPatcherProxy* PatcherProxy = NewObject<UPatcherProxy>();
-	PatcherProxy->Init(PatchSettings.Get());
-
-	PatcherProxy->DoExport();
+	Config.PakTargetPlatforms.Empty();
+	Config.PakTargetPlatforms.Add(Platform);
+	OnPakPreset(Config);
 }
 
 void FHotPatcherEditorModule::CookAndPakByAssetsAndFilters(TArray<FPatcherSpecifyAsset> IncludeAssets,TArray<FDirectoryPath> IncludePaths,TArray<ETargetPlatform> Platforms,bool bForceStandalone)
@@ -559,24 +588,30 @@ void FHotPatcherEditorModule::CookAndPakByAssetsAndFilters(TArray<FPatcherSpecif
 	FString Name = FDateTime::Now().ToString();
 	PatchSettings = MakeShareable(new FExportPatchSettings);
 	*PatchSettings = MakeTempPatchSettings(Name,IncludePaths,IncludeAssets,TArray<FPlatformExternAssets>{},Platforms,true);
+	CookAndPakByPatchSettings(PatchSettings,bForceStandalone);
+}
 
-	UPatcherProxy* PatcherProxy = NewObject<UPatcherProxy>();
-	PatcherProxy->AddToRoot();
-	Proxys.Add(PatcherProxy);
-	PatcherProxy->Init(PatchSettings.Get());
 
-	if(bForceStandalone || PatchSettings->IsStandaloneMode())
+void FHotPatcherEditorModule::CookAndPakByPatchSettings(TSharedPtr<FExportPatchSettings> InPatchSettings,bool bForceStandalone)
+{
+	if(bForceStandalone || InPatchSettings->IsStandaloneMode())
 	{
 		FString CurrentConfig;
-		THotPatcherTemplateHelper::TSerializeStructAsJsonString(*PatchSettings,CurrentConfig);
-		FString SaveConfigTo = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(),TEXT("HotPatcher"),TEXT("PatchConfig.json")));
+		THotPatcherTemplateHelper::TSerializeStructAsJsonString(*InPatchSettings.Get(),CurrentConfig);
+		FString SaveConfigTo = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(),TEXT("HotPatcher"),FString::Printf(TEXT("%s_PatchConfig.json"),*InPatchSettings->VersionId)));
 		FFileHelper::SaveStringToFile(CurrentConfig,*SaveConfigTo);
-		FString MissionCommand = FString::Printf(TEXT("\"%s\" -run=HotPatcher -config=\"%s\" %s"),*UFlibPatchParserHelper::GetProjectFilePath(),*SaveConfigTo,*PatchSettings->GetCombinedAdditionalCommandletArgs());
-		UE_LOG(LogHotPatcher,Log,TEXT("HotPatcher %s Mission: %s %s"),*PatchSettings->VersionId,*UFlibHotPatcherCoreHelper::GetUECmdBinary(),*MissionCommand);
-		RunProcMission(UFlibHotPatcherCoreHelper::GetUECmdBinary(),MissionCommand,FString::Printf(TEXT("Mission: %s"),*PatchSettings->VersionId));
+		FString MissionCommand = FString::Printf(TEXT("\"%s\" -run=HotPatcher -config=\"%s\" %s"),*UFlibPatchParserHelper::GetProjectFilePath(),*SaveConfigTo,*InPatchSettings->GetCombinedAdditionalCommandletArgs());
+		UE_LOG(LogHotPatcher,Log,TEXT("HotPatcher %s Mission: %s %s"),*InPatchSettings->VersionId,*UFlibHotPatcherCoreHelper::GetUECmdBinary(),*MissionCommand);
+		
+		FText DisplayText = UKismetTextLibrary::Conv_StringToText(FString::Printf(TEXT("Packaging %s for %s..."),*InPatchSettings->VersionId,*UFlibHotPatcherCoreHelper::GetPlatformsStr(InPatchSettings->PakTargetPlatforms)));
+		RunProcMission(UFlibHotPatcherCoreHelper::GetUECmdBinary(),MissionCommand,InPatchSettings->VersionId,DisplayText);
 	}
 	else
 	{
+		UPatcherProxy* PatcherProxy = NewObject<UPatcherProxy>();
+		PatcherProxy->AddToRoot();
+		Proxys.Add(PatcherProxy);
+		PatcherProxy->Init(InPatchSettings.Get());
 		PatcherProxy->DoExport();
 	}
 }
@@ -610,7 +645,11 @@ void FHotPatcherEditorModule::OnCookAndPakPlatform(ETargetPlatform Platform, boo
 		CurrentAsset.AssetRegistryDependencyTypes.AddUnique(EAssetRegistryDependencyTypeEx::Packages);
 		IncludeAssets.AddUnique(CurrentAsset);
 	}
-	CookAndPakByAssetsAndFilters(IncludeAssets,IncludePaths,TArray<ETargetPlatform>{Platform});
+	CookAndPakByAssetsAndFilters(IncludeAssets,IncludePaths,TArray<ETargetPlatform>{Platform}
+#if WITH_UE5
+	,true
+#endif
+	);
 }
 
 void FHotPatcherEditorModule::OnObjectSaved(UObject* ObjectSaved)
@@ -647,8 +686,8 @@ FExportPatchSettings FHotPatcherEditorModule::MakeTempPatchSettings(
 	Settings->ReloadConfig();
 	FExportPatchSettings TempSettings = Settings->TempPatchSetting;
 	TempSettings.VersionId = Name;
-	TempSettings.AssetIncludeFilters = AssetIncludeFilters;
-	TempSettings.IncludeSpecifyAssets = IncludeSpecifyAssets;
+	TempSettings.GetAssetScanConfigRef().AssetIncludeFilters = AssetIncludeFilters;
+	TempSettings.GetAssetScanConfigRef().IncludeSpecifyAssets = IncludeSpecifyAssets;
 	TempSettings.AddExternAssetsToPlatform = ExternFiles;
 	TempSettings.bCookPatchAssets = bCook;
 	TempSettings.PakTargetPlatforms = PakTargetPlatforms;
@@ -676,7 +715,29 @@ TArray<ETargetPlatform> FHotPatcherEditorModule::GetAllCookPlatforms() const
 	return TargetPlatforms;
 }
 
-TSharedPtr<FProcWorkerThread> FHotPatcherEditorModule::RunProcMission(const FString& Bin, const FString& Command, const FString& MissionName)
+TArray<ETargetPlatform> FHotPatcherEditorModule::GetAllowCookPlatforms() const
+{
+	TArray<ETargetPlatform> results;
+	UHotPatcherSettings* Settings = GetMutableDefault<UHotPatcherSettings>();
+	Settings->ReloadConfig();
+	for (auto Platform : GetAllCookPlatforms())
+	{
+		if(Settings->bWhiteListCookInEditor && !Settings->PlatformWhitelists.Contains(Platform))
+			continue;
+		FString PlatformName = THotPatcherTemplateHelper::GetEnumNameByValue(Platform);
+		if(PlatformName.StartsWith(TEXT("All")))
+			continue;
+		results.AddUnique(Platform);
+	}
+	return results;
+}
+
+void FHotPatcherEditorModule::OnCookPlatformForExterner(ETargetPlatform Platform)
+{
+	FHotPatcherEditorModule::Get().OnCookPlatform(Platform);
+}
+
+TSharedPtr<FProcWorkerThread> FHotPatcherEditorModule::RunProcMission(const FString& Bin, const FString& Command, const FString& MissionName, const FText& NotifyTextOverride)
 {
 	if (mProcWorkingThread.IsValid() && mProcWorkingThread->GetThreadStatus()==EThreadStatus::Busy)
 	{
@@ -690,8 +751,13 @@ TSharedPtr<FProcWorkerThread> FHotPatcherEditorModule::RunProcMission(const FStr
 		mProcWorkingThread->ProcSuccessedDelegate.AddUObject(MissionNotifyProay,&UMissionNotificationProxy::SpawnMissionSuccessedNotification);
 		mProcWorkingThread->ProcFaildDelegate.AddUObject(MissionNotifyProay,&UMissionNotificationProxy::SpawnMissionFaildNotification);
 		MissionNotifyProay->SetMissionName(*FString::Printf(TEXT("%s"),*MissionName));
+		FText DisplayText = NotifyTextOverride;
+		if(DisplayText.IsEmpty())
+		{
+			DisplayText = FText::FromString(FString::Printf(TEXT("%s in progress"),*MissionName));
+		}
 		MissionNotifyProay->SetMissionNotifyText(
-			FText::FromString(FString::Printf(TEXT("%s in progress"),*MissionName)),
+		DisplayText,
 			LOCTEXT("RunningCookNotificationCancelButton", "Cancel"),
 			FText::FromString(FString::Printf(TEXT("%s Mission Finished!"),*MissionName)),
 			FText::FromString(FString::Printf(TEXT("%s Failed!"),*MissionName))

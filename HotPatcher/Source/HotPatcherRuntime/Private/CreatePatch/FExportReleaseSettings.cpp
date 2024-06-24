@@ -30,7 +30,7 @@ void FExportReleaseSettings::Init()
 			if(!!PakListConf->PakResponseFiles.Num())
 			{
 				FReleasePaklistParser PakListParser;
-				PakListParser.Parser(PakListConf);
+				PakListParser.Parser(PakListConf,GetHashCalculator());
 				PlatformAssets.Add(PakListParser.GetParserResult());
 			}
 
@@ -40,10 +40,11 @@ void FExportReleaseSettings::Init()
 			{
 				PakFileConf->PakFiles.AddUnique(FPaths::ConvertRelativePathToFull(PakFile.FilePath));
 			}
+			PakFileConf->AESKey = PlatformPakList.AESKey;
 			if(!!PakFileConf->PakFiles.Num())
 			{
 				FReleasePakParser PakFileParser;
-				PakFileParser.Parser(PakFileConf);
+				PakFileParser.Parser(PakFileConf,GetHashCalculator());
 				PlatformAssets.Add(PakFileParser.GetParserResult());
 			}
 		}
@@ -139,7 +140,7 @@ void FExportReleaseSettings::ClearImportedPakList()
 {
 	UE_LOG(LogHotPatcher,Log,TEXT("FExportReleaseSettings::ClearImportedPakList"));
 	AddExternAssetsToPlatform.Empty();
-	IncludeSpecifyAssets.Empty();
+	GetAssetScanConfigRef().IncludeSpecifyAssets.Empty();
 }
 	
 // for DetailView property change property

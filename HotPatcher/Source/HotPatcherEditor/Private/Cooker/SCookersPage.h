@@ -34,13 +34,12 @@ public:
 	 * @param InArgs The Slate argument list.
 	 */
 	void Construct(	const FArguments& InArgs,TSharedPtr<FHotPatcherContextBase> InContext);
-
+	virtual FString GetPageName() const override{ return TEXT("Cooker"); }
+	
 public:
 	FText HandleCookerModeComboButtonContentText() const;
 	void HandleHotPatcherMenuEntryClicked(FString InModeName,TFunction<void(void)> ActionCallback);
 	EVisibility HandleOperatorConfigVisibility()const;
 	EVisibility HandleImportProjectConfigVisibility()const;
-//
-// private:
-// 	TSharedPtr<FOriginalCookerContext> OriginalCookerContext;
+	virtual void SelectToAction(const FString& ActionName);
 };

@@ -20,6 +20,11 @@
 #include "Kismet/KismetTextLibrary.h"
 #include "Misc/FileHelper.h"
 #include "Misc/ScopedSlowTask.h"
+#include "Misc/EngineVersionComparison.h"
+
+#if !UE_VERSION_OLDER_THAN(5,1,0)
+	typedef FAppStyle FEditorStyle;
+#endif
 
 #define LOCTEXT_NAMESPACE "SHotPatcherExportRelease"
 
@@ -75,6 +80,8 @@ void SHotPatcherReleaseWidget::ImportConfig()
 	{
 		// UFlibHotPatcherCoreHelper::DeserializeReleaseConfig(ExportReleaseSettings, JsonContent);
 		THotPatcherTemplateHelper::TDeserializeJsonStringAsStruct(JsonContent,*ExportReleaseSettings);
+		// adaptor old version config
+		UFlibHotPatcherCoreHelper::AdaptorOldVersionConfig(ExportReleaseSettings->GetAssetScanConfigRef(),JsonContent);
 		SettingsView->GetDetailsView()->ForceRefresh();
 	}
 }

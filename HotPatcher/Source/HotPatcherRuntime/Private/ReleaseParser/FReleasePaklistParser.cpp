@@ -1,10 +1,9 @@
 #include "FReleasePaklistParser.h"
-
 #include "Misc/FileHelper.h"
 #include "FlibPatchParserHelper.h"
 #include "HotPatcherLog.h"
 #include "Kismet/KismetStringLibrary.h"
-// #include "Misc/PathViews.h"
+#include "Misc/EngineVersionComparison.h"
 
 
 FString NormalizePaklistPath(const FString& InStr)
@@ -39,7 +38,7 @@ FPakListAssetItem BreakPakListLine(const FString& PakListLine)
 	return result;
 }
 
-void FReleasePaklistParser::Parser(TSharedPtr<FReleaseParserConf> ParserConf)
+void FReleasePaklistParser::Parser(TSharedPtr<FReleaseParserConf> ParserConf, EHashCalculator HashCalculator)
 {
 	result.Platform = ParserConf->TargetPlatform;
 	FReleasePakListConf* Conf = (FReleasePakListConf*)ParserConf.Get();
@@ -55,7 +54,11 @@ void FReleasePaklistParser::Parser(TSharedPtr<FReleaseParserConf> ParserConf)
 				{
 					FPakListAssetItem LineItem = BreakPakListLine(PakListLine);
 					FString Extersion = FPaths::GetExtension(LineItem.MountPak,true);
-					if(UFlibPatchParserHelper::GetCookedUassetExtensions().Contains(Extersion))
+					bool bIsWPFiles = false;
+				#if UE_VERSION_NEWER_THAN(5,0,0)
+					bIsWPFiles = LineItem.MountPak.Contains(TEXT("/_Generated_/"));
+				#endif
+					if(!bIsWPFiles && UFlibPatchParserHelper::GetCookedUassetExtensions().Contains(Extersion))
 					{
 						if(UFlibPatchParserHelper::GetUnCookUassetExtensions().Contains(Extersion))
 						{
@@ -82,9 +85,9 @@ void FReleasePaklistParser::Parser(TSharedPtr<FReleaseParserConf> ParserConf)
 					{
 						// is not-uasset
 						FExternFileInfo ExFile;
-						ExFile.FilePath.FilePath = LineItem.AbsPath;
+						ExFile.SetFilePath(LineItem.AbsPath);
 						ExFile.MountPath = LineItem.MountPak;
-						ExFile.GenerateFileHash();
+						ExFile.GenerateFileHash(HashCalculator);
 						result.ExternFiles.AddUnique(ExFile);
 					}
 				}
